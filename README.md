@@ -1,33 +1,63 @@
-# Newdanbipubgame
+# 홀덤펍 타이쿤
 
-정적 웹 게임 프로젝트 (HTML + CSS + Vanilla JS).
+화면에 의존하지 않는 경제 엔진부터 만든다. 현재 **작업 A(경제 상태와 분 단위 계산)** 까지 구현했다.
+
+이전 홀덤펍 타이쿤과 별개의 신규 프로젝트다. 기존 코드나 설계를 가져오지 않았다.
+
+## 문서
+
+| 문서 | 성격 |
+|---|---|
+| [docs/01_GDD_v1.0.md](docs/01_GDD_v1.0.md) | **확정 개발 기준.** 코드가 반드시 따른다 |
+| [docs/02_Economy_Specification_v0.1.md](docs/02_Economy_Specification_v0.1.md) | 구현 가능한 규칙으로 구체화한 제안 초안 |
+| [docs/03_Progression_Specification_v0.1.md](docs/03_Progression_Specification_v0.1.md) | 성장 구조 구현 초안 |
+| [docs/04_검증결과_개발인계.md](docs/04_검증결과_개발인계.md) | 별도 계산 도구의 검산 결과와 인계문 |
+| [docs/05_채택기록_v1.md](docs/05_채택기록_v1.md) | **초안 중 무엇을 이 코드가 따르는가.** 채택/보류/후속 판정 |
+
+초안 수치를 임의로 확정하지 않는다. 채택 여부는 05번 문서에만 기록한다.
 
 ## 실행
 
-XAMPP가 켜져 있으면 브라우저에서 바로 열립니다.
-
-```
-http://localhost/Newdanbipubgame/
-```
-
-또는 정적 서버로:
-
-```
-npx serve .
+```bash
+npm install
+npm test        # 전체 검증 스위트 (109건)
+npm run verify  # 04 검증결과 문서와의 대조표 출력
+npm run typecheck
+npm run build   # 라이브러리 모드 빌드 (화면 없음)
 ```
 
-## 폴더 구조
+## 구조
 
 ```
-index.html          진입점
-css/style.css       전역 스타일
-js/main.js          루프 + 부트스트랩
-js/game.js          게임 상태/렌더링
-assets/images/      스프라이트·배경
-assets/audio/       사운드
-docs/               기획·설계 문서
+src/config/economy.ts   모든 밸런스 수치. 값마다 [확정]/[초안]/[채택] 출처 표기
+src/engine/
+  types.ts              경제 상태 타입, 명령, 이벤트
+  fixed.ts              정수 나눗셈 + 나머지 보존
+  state.ts              생성·복제·직렬화·불변식 검사
+  derive.ts             처리 능력 등 파생값 (절대 저장하지 않는다)
+  demand.ts             방문 수요 (정수 분수)
+  seating.ts            대기·착석·이탈
+  satisfaction.ts       서비스 품질·이탈률·만족도
+  costs.ts              분당 반복 비용
+  cash.ts               현금·잠금 금액·대회 준비비 계산
+  commands.ts           플레이어 명령 검증과 적용
+  tick.ts               Economy §10의 9단계
+  forecast.ts           투자 전후 예상치
+tests/                  109건. P01~P15 중 경제 항목과 04 §1 검산 재현
+scripts/verify.ts       문서 대조표
+legacy/                 프로젝트 생성 시의 정적 골격 보존본 (경제 엔진과 무관)
 ```
 
-## 현재 상태
+## 설계 원칙
 
-골격만 있는 상태입니다. `js/game.js`의 `render()`는 자리표시용 도형을 그립니다.
+- **엔진은 게임 분만 다룬다.** 현실 시각 환산은 엔진 밖의 책임이다. 시간 배율이 바뀌어도 엔진과 테스트는 그대로다.
+- **`tick`은 입력 상태를 수정하지 않는다.** 투자 예상치가 "투자 안 함"과 비교할 기준을 잃지 않게 하기 위해서다.
+- **예측과 실제가 같은 코드를 쓴다.** 예상치는 별도 근사식이 아니라 상태를 복제해 같은 `tick`을 돌린다.
+- **처리 능력은 저장하지 않는다.** 항상 테이블의 실제 상태에서 파생한다.
+- **부동소수를 쓰지 않는다.** 화폐는 1G = 60 units 정수, 인지도·만족도는 ×1000 정수, 나눗셈은 floor + 나머지 보존.
+- **미구현 영역을 조용히 무시하지 않는다.** 대회·리모델링·긴급 운영 상태를 만나면 명시적으로 거부한다.
+
+## 이번 작업에 포함하지 않은 것
+
+대회 진행, 리모델링 전환, 긴급 축소 운영, 오프라인·현실 시간 환산, 화면.
+자세한 범위는 [docs/05_채택기록_v1.md](docs/05_채택기록_v1.md) §1 참조.

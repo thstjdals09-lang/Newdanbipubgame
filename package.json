@@ -1,0 +1,21 @@
+{
+  "name": "newdanbipubgame-economy",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "홀덤펍 타이쿤 — 화면에 의존하지 않는 경제 엔진 (작업 A)",
+  "scripts": {
+    "test": "vitest run",
+    "test:watch": "vitest",
+    "verify": "tsx scripts/verify.ts",
+    "typecheck": "tsc --noEmit",
+    "build": "vite build"
+  },
+  "devDependencies": {
+    "@types/node": "^26.6.2",
+    "tsx": "^4.19.2",
+    "typescript": "^5.7.2",
+    "vite": "^6.0.7",
+    "vitest": "^2.1.8"
+  }
+}
