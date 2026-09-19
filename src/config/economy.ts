@@ -167,7 +167,10 @@ export interface EconomyConfig {
 
   /**
    * [초안 Economy §8] 대회 수치.
-   * 이번 구현은 준비비 계산만 사용한다. 예약·진행·정산은 작업 B.
+   *
+   * small은 B-1~B-2에서, mid는 C-2에서 예약·진행·정산·예상치까지 연결됐다.
+   * mid 수치는 **미검증 제안을 잠정 기준으로 쓰는 것**이다 (05 §1-1, §7-6).
+   * 엔진에는 규모별 분기가 없다. 모든 계산이 이 표의 값만 참조한다.
    */
   readonly tournament: Readonly<Record<'small' | 'mid', TournamentSpec>>;
 
@@ -242,6 +245,9 @@ export interface EconomyConfig {
  * 9단계 마지막에 리모델링 전환이 추가됐다. 긴급 축소의 적용 시점도 유예된다.
  * 리모델링이 걸리지 않은 상태(remodel === null)의 결과는 이전과 같지만,
  * 규칙 자체가 달라졌으므로 올린다.
+ *
+ * C-2(중규모 대회)에서는 올리지 않았다. B-2A와 같은 이유다 — Economy §8이 이미
+ * 규정한 동작을 연결했을 뿐 공식·반올림·9단계 순서가 그대로다.
  */
 export const RULES_VERSION = 'economy-0.3+c1-remodel';
 
@@ -265,6 +271,9 @@ export const RULES_VERSION = 'economy-0.3+c1-remodel';
  *   records.completedRemodels / nextRemodelSeq
  * GameState.remodel 필드 자체는 작업 A(v1)부터 늘 있었으므로 초기화하지 않고
  * 값만 확인한다. v4는 리모델링 작업을 표현할 수 없었으므로 null이어야 한다.
+ *
+ * C-2(중규모 대회)에서는 올리지 않았다. 예약·완료 기록의 scale은 v2/v3부터
+ * 'small' | 'mid'였고, 해금 표시는 기존 unlocks 배열에 담는다 (B-2B와 같은 방식).
  *
  * 모든 마이그레이션의 의미가 완전히 정의된다 (state.ts의 migrateSave 참조).
  * v2가 담을 수 있던 대회 상태(없음 / DRAINING / READY)는 그대로 보존한다.

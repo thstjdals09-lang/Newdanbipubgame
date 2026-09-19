@@ -20,7 +20,7 @@ import {
   tablePriceGold,
 } from './derive.js';
 import { applyRemodelRequest, planRemodel } from './remodel.js';
-import { applyReservation, isDealerReserved, planSmallTournament } from './tournament.js';
+import { applyReservation, isDealerReserved, planTournament } from './tournament.js';
 import type {
   Command,
   CommandResult,
@@ -174,7 +174,12 @@ export function validateCommand(
     case 'reserveSmallTournament': {
       // 자격 판정은 tournament.ts가 단독으로 소유한다.
       // 검증과 적용이 같은 함수를 쓰므로 규칙이 갈라질 수 없다 (계약 2).
-      return planSmallTournament(state, command.tableIds, config).result;
+      return planTournament(state, 'small', command.tableIds, config).result;
+    }
+
+    case 'reserveMidTournament': {
+      // 규모만 다르고 같은 판정 함수를 쓴다 (C-2).
+      return planTournament(state, 'mid', command.tableIds, config).result;
     }
 
     case 'buyPromotion': {
@@ -318,9 +323,18 @@ export function applyCommand(
     }
 
     case 'reserveSmallTournament': {
-      const { result, plan } = planSmallTournament(state, command.tableIds, config);
+      const { result, plan } = planTournament(state, 'small', command.tableIds, config);
       if (!result.ok || !plan) {
         throw new Error('reserveSmallTournament: 검증을 통과하지 않은 명령');
+      }
+      applyReservation(state, plan, events);
+      return;
+    }
+
+    case 'reserveMidTournament': {
+      const { result, plan } = planTournament(state, 'mid', command.tableIds, config);
+      if (!result.ok || !plan) {
+        throw new Error('reserveMidTournament: 검증을 통과하지 않은 명령');
       }
       applyReservation(state, plan, events);
       return;

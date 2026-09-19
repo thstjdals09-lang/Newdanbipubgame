@@ -31,7 +31,7 @@ import {
   cloneState,
 } from './state.js';
 import { SECOND_THEME_UNLOCK_ID, isRemodelPreparing, processRemodel } from './remodel.js';
-import { processTournament } from './tournament.js';
+import { MID_TOURNAMENT_UNLOCK_ID, processTournament } from './tournament.js';
 import type { Command, EngineEvent, GameState, TickResult } from './types.js';
 
 /** 틱 9단계: 해금 판정. 같은 해금은 기록 ID로 한 번만 부여한다 (Progression §4). */
@@ -56,6 +56,10 @@ function processUnlocks(state: GameState, config: EconomyConfig, events: EngineE
   // 조건으로 판정하므로 리모델링 전환 코드가 따로 부여하지 않아도 되고,
   // 기존 ID 검사가 중복 부여를 막는다.
   grant(SECOND_THEME_UNLOCK_ID, state.venue.stage >= 2);
+  // 중규모 대회도 2단계 도달로 열린다 (Progression §4, C-2).
+  // 해금 기록이 아니라 상태(단계)에서 직접 판정하므로, C-2 이전에 2단계가 된
+  // 저장본도 다음 틱에 정확히 한 번 해금된다 (B-2B와 같은 방식, 05 §7-2).
+  grant(MID_TOURNAMENT_UNLOCK_ID, state.venue.stage >= 2);
 }
 
 /**

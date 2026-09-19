@@ -414,6 +414,12 @@ export type Command =
    */
   | { readonly type: 'reserveSmallTournament'; readonly tableIds: readonly TableId[] }
   /**
+   * 중규모 대회 예약 (C-2). 2단계 매장에서 열린다.
+   * 소규모와 같은 정책이다 — 플레이어가 테이블 ID 4개를 명시적으로 고르고,
+   * 딜러는 그 테이블의 현재 담당자에서 파생한다 (05 R9).
+   */
+  | { readonly type: 'reserveMidTournament'; readonly tableIds: readonly TableId[] }
+  /**
    * 리모델링 요청 (C-1).
    * 1단계 매장을 2단계로 확장한다. 조건과 비용은 planRemodel이 판정한다.
    */

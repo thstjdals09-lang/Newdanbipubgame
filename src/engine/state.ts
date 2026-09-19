@@ -163,11 +163,13 @@ export function assertSupported(state: GameState, config: EconomyConfig): void {
           `지원하지 않는 단계: ${String(tournament.phase)}`,
       );
     }
-    if (tournament.scale !== 'small') {
+    // 소규모(B-2A)와 중규모(C-2)를 지원한다. 진행·정산은 config.tournament[scale]만
+    // 참조하므로 규모별 분기가 없다. 정의되지 않은 규모는 그 조회가 undefined를 돌려줘
+    // 계산이 조용히 깨지므로, 여기서 명시적으로 거절한다.
+    if (tournament.scale !== 'small' && tournament.scale !== 'mid') {
       throw new UnsupportedStateError(
         'TOURNAMENT_NOT_IMPLEMENTED',
-        '대회 진행은 작업 B-2에서 구현한다. 이 상태로는 계산할 수 없다. ' +
-          `지원하지 않는 규모: ${String(tournament.scale)}`,
+        `지원하지 않는 대회 규모: ${String(tournament.scale)}`,
       );
     }
   }

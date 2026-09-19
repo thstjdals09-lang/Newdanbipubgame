@@ -32,6 +32,7 @@ import type {
   RejectReason,
   StaffId,
   TableId,
+  TournamentScale,
   UnsupportedCode,
 } from './types.js';
 
@@ -256,6 +257,21 @@ export function forecast(
     };
   }
 
+  // 규모와 무관하다. 중규모 예약 명령(C-2)도 같은 이유로 여기서 계산하지 않는다.
+  // 이 분기를 빠뜨리면 일반 투자 회계가 준비비 잠금과 지연 정산을 잘못 계산한 채
+  // supported: true를 돌려주게 된다.
+  if (command.type === 'reserveMidTournament') {
+    return {
+      supported: false,
+      code: 'TOURNAMENT_NOT_IMPLEMENTED',
+      detail:
+        '중규모 대회 예약 명령의 예상치도 대회 시작·진행·정산까지 계산해야 의미가 있다. ' +
+        '이 함수의 일반 투자 회계 필드(추가 매출·회수 시간)로는 준비비 잠금과 ' +
+        "지연 정산을 올바르게 표현할 수 없다. forecastTournament(state, 'mid', tableIds, " +
+        'config, horizon)를 사용할 것.',
+    };
+  }
+
   try {
     assertSupported(original, config);
     const baselineStart = cloneState(original);
@@ -391,6 +407,7 @@ export interface TournamentForecastOk {
   readonly horizonMinutes: number;
 
   /** 예약이 만들 대회의 확정 정보 */
+  readonly scale: TournamentScale;
   readonly tournamentId: string;
   readonly participants: number;
   readonly tableIds: readonly TableId[];
@@ -495,7 +512,7 @@ function runTournamentBranch(
 }
 
 /**
- * 소규모 대회 예상치 (작업 B-2C).
+ * 대회 예상치 (작업 B-2C, C-2에서 규모 일반화).
  *
  *   A. 대회를 열지 않고 일반 영업을 계속한다.
  *   B. 지금 예약하고 대회를 끝까지 치른다.
@@ -512,14 +529,15 @@ function runTournamentBranch(
  *   - 급여·시설비는 전역 틱이 부과하므로 대회 쪽에서 또 빼지 않는다.
  *   - 일반 투자 예상치의 회수 시간(paybackMinutes)을 대회에 재사용하지 않는다.
  */
-export function forecastSmallTournament(
+export function forecastTournament(
   original: GameState,
+  scale: TournamentScale,
   tableIds: readonly TableId[],
   config: EconomyConfig = DEFAULT_CONFIG,
   horizonMinutes: number = DEFAULT_HORIZON_MINUTES,
 ): TournamentForecastResult {
   if (!Number.isSafeInteger(horizonMinutes) || horizonMinutes < 1) {
-    throw new RangeError(`forecastSmallTournament: 예측 분이 올바르지 않음 (${horizonMinutes})`);
+    throw new RangeError(`forecastTournament: 예측 분이 올바르지 않음 (${horizonMinutes})`);
   }
 
   // 이미 대회가 걸려 있으면 "대회를 안 열었을 때"라는 비교 기준을 만들 수 없다.
@@ -545,7 +563,12 @@ export function forecastSmallTournament(
     };
   }
 
-  const command: Command = { type: 'reserveSmallTournament', tableIds: [...tableIds] };
+  // 규모에 따라 달라지는 것은 예약 명령뿐이다. 참가자 수·준비비·참가비는
+  // 실제 예약과 실제 정산이 만든 값을 그대로 읽는다. 여기서 따로 계산하지 않는다.
+  const command: Command =
+    scale === 'small'
+      ? { type: 'reserveSmallTournament', tableIds: [...tableIds] }
+      : { type: 'reserveMidTournament', tableIds: [...tableIds] };
 
   // 자격 판정은 기존 검증 함수를 그대로 쓴다. 자격 미달은 미지원이 아니라 거절이다.
   const check = validateCommand(original, command, config);
@@ -571,7 +594,7 @@ export function forecastSmallTournament(
     applyCommand(tournamentStart, command, config, []);
     const reservation = tournamentStart.tournament;
     if (reservation === null) {
-      throw new Error('forecastSmallTournament: 예약이 만들어지지 않았다');
+      throw new Error('forecastTournament: 예약이 만들어지지 않았다');
     }
     const cashAfterReservation = cashSnapshot(tournamentStart);
 
@@ -602,7 +625,7 @@ export function forecastSmallTournament(
     );
     if (!record) {
       throw new Error(
-        `forecastSmallTournament: 대회 ${reservation.id}가 사라졌는데 완료 기록이 없다`,
+        `forecastTournament: 대회 ${reservation.id}가 사라졌는데 완료 기록이 없다`,
       );
     }
 
@@ -631,7 +654,7 @@ export function forecastSmallTournament(
       delta.oneOffExpenseUnits;
     if (reconciled !== delta.endCashUnits) {
       throw new Error(
-        'forecastSmallTournament: 현금 차이가 수입·지출 차이와 맞지 않는다 ' +
+        'forecastTournament: 현금 차이가 수입·지출 차이와 맞지 않는다 ' +
           `(기록 ${reconciled} vs 현금 ${delta.endCashUnits})`,
       );
     }
@@ -639,6 +662,7 @@ export function forecastSmallTournament(
     return {
       supported: true,
       horizonMinutes,
+      scale: reservation.scale,
       tournamentId: reservation.id,
       participants: reservation.participants,
       tableIds: [...reservation.tableIds],
@@ -658,4 +682,16 @@ export function forecastSmallTournament(
     }
     throw error;
   }
+}
+
+/**
+ * 소규모 대회 예상치. forecastTournament의 얇은 래퍼다 (B-2C부터의 공개 이름 유지).
+ */
+export function forecastSmallTournament(
+  original: GameState,
+  tableIds: readonly TableId[],
+  config: EconomyConfig = DEFAULT_CONFIG,
+  horizonMinutes: number = DEFAULT_HORIZON_MINUTES,
+): TournamentForecastResult {
+  return forecastTournament(original, 'small', tableIds, config, horizonMinutes);
 }

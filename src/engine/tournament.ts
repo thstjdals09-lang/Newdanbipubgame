@@ -11,10 +11,13 @@
  *   - 종료 정산: 준비비 비용화, 참가비 수입, 인지도 보상, 개최 실적
  *   - 예약 자원(테이블·딜러)의 해제
  *
- * 다음은 여전히 후속 범위다. 이 모듈에 넣지 않는다.
- *   - 중규모 대회 진행
- *   - 대회를 반영한 투자 예상치
- *   - 특별 직원 지급, 긴급 축소 운영, 리모델링
+ * C-2가 여기에 더한 범위:
+ *   - 중규모 대회. 자격 판정을 planTournament(scale)로 일반화했다.
+ *     진행·정산은 B-2A부터 config.tournament[scale]만 참조했으므로 그대로다.
+ *
+ * 다음은 이 모듈에 넣지 않는다. 각자의 모듈이 소유한다.
+ *   - 대회를 반영한 투자 예상치 (forecast.ts)
+ *   - 특별 직원 지급 (tick.ts), 긴급 축소 운영 (emergency.ts), 리모델링 (remodel.ts)
  *
  * 별도 모듈로 분리한 이유: commands.ts는 명령 배선과 단순 구매 검증을 담고 있고,
  * 예약 자격은 12개 검사와 자원 소유 규칙이라 성격이 다르다.
@@ -46,6 +49,14 @@ const no = (reason: RejectReason, detail?: string): CommandResult =>
 
 /** 해금 ID. tick 9단계의 processUnlocks가 부여한다. */
 export const SMALL_TOURNAMENT_UNLOCK_ID = 'smallTournament';
+
+/** 중규모 대회 해금 ID. 2단계 도달로 열린다 (Progression §4, C-2). */
+export const MID_TOURNAMENT_UNLOCK_ID = 'midTournament';
+
+/** 규모별 해금 ID */
+export function tournamentUnlockId(scale: TournamentScale): string {
+  return scale === 'small' ? SMALL_TOURNAMENT_UNLOCK_ID : MID_TOURNAMENT_UNLOCK_ID;
+}
 
 /** 게임일 번호 = floor(경과 게임분 / 하루 길이) (Economy §8) */
 export function gameDayOf(minute: number, config: EconomyConfig): number {
@@ -94,29 +105,38 @@ export interface ReservationPlan {
   readonly gameDay: number;
 }
 
+/** 해금되지 않았을 때 보여 줄 조건 설명 */
+function lockedDetail(scale: TournamentScale, config: EconomyConfig): string {
+  if (scale === 'small') {
+    return (
+      `테이블 ${config.unlock.smallTournamentTableCount}개와 인지도 ` +
+      `${config.unlock.smallTournamentAwarenessMilli / 1000} 필요`
+    );
+  }
+  return '2단계 매장 도달 필요 (리모델링 완료 후 해금)';
+}
+
 /**
  * 예약 자격 판정. **상태를 수정하지 않는다.**
  *
  * 성공하면 적용에 필요한 값이 모두 담긴 plan을 함께 돌려준다.
  * 검증과 적용이 같은 함수로 자격을 판단하므로 규칙이 갈라질 수 없다 (계약 2).
+ *
+ * 규모에 따라 달라지는 것은 해금 ID와 config.tournament[scale]의 수치뿐이다.
+ * 검사 항목과 순서는 규모와 무관하게 같다. 참가자 수는 고정값이 아니라
+ * **예약 시점의 수요**에서 계산하며, 최소 인원에 못 미치면 거절한다 (Economy §8).
  */
-export function planSmallTournament(
+export function planTournament(
   state: GameState,
+  scale: TournamentScale,
   tableIds: readonly TableId[],
   config: EconomyConfig,
 ): { readonly result: CommandResult; readonly plan?: ReservationPlan } {
-  const scale: TournamentScale = 'small';
   const spec = config.tournament[scale];
 
-  // 1. 해금
-  if (!state.unlocks.some((u) => u.id === SMALL_TOURNAMENT_UNLOCK_ID)) {
-    return {
-      result: no(
-        'TOURNAMENT_LOCKED',
-        `테이블 ${config.unlock.smallTournamentTableCount}개와 인지도 ` +
-          `${config.unlock.smallTournamentAwarenessMilli / 1000} 필요`,
-      ),
-    };
+  // 1. 해금. 해금과 실행 가능 여부는 분리한다 (Progression §4).
+  if (!state.unlocks.some((u) => u.id === tournamentUnlockId(scale))) {
+    return { result: no('TOURNAMENT_LOCKED', lockedDetail(scale, config)) };
   }
 
   // 2. 단계와 규모 가용성
@@ -142,7 +162,7 @@ export function planSmallTournament(
     return { result: no('TOURNAMENT_DAY_USED', `게임일 ${gameDay}의 개최권을 이미 사용했다`) };
   }
 
-  // 3. 정확히 2개, 중복 없음
+  // 3. 규모가 요구하는 개수(소규모 2, 중규모 4)와 정확히 같아야 하고 중복이 없어야 한다
   if (tableIds.length !== spec.tables) {
     return {
       result: no('TOURNAMENT_TABLE_COUNT', `테이블 ${spec.tables}개를 선택해야 한다`),
@@ -183,7 +203,7 @@ export function planSmallTournament(
     return { result: no('TOURNAMENT_DEALER_DUPLICATE') };
   }
   if (dealerIds.length !== spec.dealers) {
-    // 테이블 수와 딜러 수는 소규모에서 같다. 방어적 검사.
+    // 테이블 수와 딜러 수는 두 규모 모두 같다 (Economy §8). 방어적 검사.
     return { result: no('TOURNAMENT_TABLE_COUNT', `딜러 ${spec.dealers}명이 필요하다`) };
   }
 
@@ -235,8 +255,17 @@ export function planSmallTournament(
   };
 }
 
+/** 소규모 대회 자격 판정. planTournament의 얇은 래퍼다 (B-1부터의 공개 이름 유지). */
+export function planSmallTournament(
+  state: GameState,
+  tableIds: readonly TableId[],
+  config: EconomyConfig,
+): { readonly result: CommandResult; readonly plan?: ReservationPlan } {
+  return planTournament(state, 'small', tableIds, config);
+}
+
 /**
- * 예약 적용. planSmallTournament가 통과한 plan만 받는다.
+ * 예약 적용. planTournament가 통과한 plan만 받는다.
  *
  * 부분 적용을 남기지 않기 위해 **예외를 던질 수 있는 lock()을 가장 먼저** 호출한다.
  * lock이 실패하면 아무것도 바뀌지 않은 상태로 예외가 올라간다.
