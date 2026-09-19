@@ -24,8 +24,16 @@ export type SessionId = string;
  *   idle            설치됐으나 딜러가 없음. 처리 능력에 포함하지 않고 시설비도 없다 (P02)
  *   operating       일반 영업 중
  *   closing         신규 착석 차단, 기존 세션만 소진. 딜러 교체·휴업 요청 중 (Economy §5)
- *   tournamentHeld  대회 예약·진행 중 (작업 B)
+ *   tournamentHeld  대회가 점유 중. B-1에서는 예약 준비 단계 (작업 B-2가 진행을 맡는다)
  *   remodelPrep     리모델링 준비 중 (작업 C)
+ *
+ * closing과 tournamentHeld는 둘 다 신규 착석을 막지만 소유 주체가 다르다.
+ *   closing        -> 소유자는 "딜러 변경 요청". 세션이 비면 applyPendingDealerChanges가
+ *                     pendingDealerId에 따라 딜러를 붙이거나 **떼어내고** idle로 되돌린다.
+ *   tournamentHeld -> 소유자는 GameState.tournament 예약 레코드.
+ *                     딜러 변경 전환 코드는 이 상태를 절대 건드리지 않는다.
+ *                     해제는 작업 B-2의 대회 종료 정산만 할 수 있다.
+ * 이 분리를 깨면 예약된 딜러가 조용히 풀린다 (계약 4).
  */
 export type TableStatus =
   | 'idle'
@@ -88,6 +96,52 @@ export interface AbandonWindow {
   sumAbandons: number;
 }
 
+/* ------------------------------------------------------------------ */
+/* 대회 예약 (작업 B-1)                                                 */
+/* ------------------------------------------------------------------ */
+
+export type TournamentScale = 'small' | 'mid';
+
+/**
+ * 대회 생애주기 중 **B-1이 소유하는 구간**.
+ *
+ *   RESERVED_DRAINING  예약됨. 선택 테이블이 신규 일반 손님을 받지 않고
+ *                      기존 세션이 끝나기를 기다린다 (Economy §8 진행순서 2).
+ *   RESERVED_READY     선택 테이블의 기존 일반 세션이 모두 정산됐다.
+ *                      **대회가 시작된 상태가 아니다.**
+ *
+ * RESERVED_READY 다음(대회 시작·진행 시간 계산·정산·자원 해제)은 전부 작업 B-2다.
+ * B-2가 단계를 추가하면 여기에 이어 붙이고, assertSupported가 새 단계를
+ * 미지원으로 걸러내므로 B-1 코드가 B-2 상태를 조용히 처리하는 일은 없다.
+ */
+export type TournamentPhase = 'RESERVED_DRAINING' | 'RESERVED_READY';
+
+/**
+ * 대회 예약 레코드. **권위 있는 유일한 저장소다.**
+ * 별도의 예약 레지스트리를 두지 않는다 (계약: required_behavior).
+ *
+ * 직렬화만으로 자원 소유 관계를 복원할 수 있어야 하므로
+ * 테이블·딜러 ID를 레코드 안에 함께 보관한다.
+ */
+export interface TournamentReservation {
+  readonly id: string;
+  readonly scale: TournamentScale;
+  phase: TournamentPhase;
+  /** 예약 시 수요로 확정한다. 이후 수요가 바뀌어도 변하지 않는다 (Economy §8). */
+  readonly participants: number;
+  /** 예약 테이블. 소규모는 정확히 2개. */
+  readonly tableIds: readonly TableId[];
+  /** tableIds와 같은 순서로 대응하는 담당 딜러. */
+  readonly dealerIds: readonly StaffId[];
+  /** 상금 + 참가자별 운영비 + 고정 개최비 (05 채택기록 R2). 잠긴 금액과 같다. */
+  readonly prepCostUnits: Money;
+  /** floor(경과 게임분 / minutesPerGameDay) */
+  readonly gameDay: number;
+  readonly reservedAtMinute: GameMinute;
+  /** RESERVED_READY로 바뀐 시각. B-2가 진행 시작 시점으로 쓴다. */
+  readyAtMinute: GameMinute | null;
+}
+
 export interface UnlockRecord {
   readonly id: string;
   readonly grantedAtMinute: GameMinute;
@@ -135,11 +189,15 @@ export interface GameState {
   sessions: SessionState[];
   queue: QueueEntry[];
 
-  /** 작업 B. 이번 구현에서는 항상 null이며, null이 아니면 엔진이 거절한다. */
-  tournament: null;
-  /** 작업 C. 위와 동일. */
+  /**
+   * 대회 예약. B-1이 만들고 소유한다.
+   * 준비 단계(RESERVED_DRAINING / RESERVED_READY)만 지원하며
+   * 그 밖의 단계는 assertSupported가 미지원으로 거절한다.
+   */
+  tournament: TournamentReservation | null;
+  /** 작업 C. null이 아니면 엔진이 거절한다. */
   remodel: null;
-  /** 작업 B. 긴급 축소 운영. 위와 동일. */
+  /** 작업 B-3. 긴급 축소 운영. 위와 동일. */
   emergency: null;
 
   unlocks: UnlockRecord[];
@@ -170,6 +228,7 @@ export interface GameState {
     nextStaffSeq: number;
     nextSessionSeq: number;
     nextLedgerSeq: number;
+    nextTournamentSeq: number;
   };
 
   window: AbandonWindow;
@@ -189,7 +248,13 @@ export type Command =
   | { readonly type: 'setStaffStandby'; readonly staffId: StaffId }
   | { readonly type: 'setServiceWorking'; readonly staffId: StaffId }
   | { readonly type: 'upgradeAmenity' }
-  | { readonly type: 'buyPromotion' };
+  | { readonly type: 'buyPromotion' }
+  /**
+   * 소규모 대회 예약 (B-1).
+   * 플레이어가 테이블 ID 2개를 **명시적으로** 고른다.
+   * 딜러는 그 테이블의 현재 담당자에서 파생한다. 자동 선택은 없다 (05 R9).
+   */
+  | { readonly type: 'reserveSmallTournament'; readonly tableIds: readonly TableId[] };
 
 export type RejectReason =
   | 'INSUFFICIENT_CASH'
@@ -208,7 +273,21 @@ export type RejectReason =
   | 'PROMOTION_AWARENESS_TOO_HIGH'
   | 'STAFF_IS_SERVICE'
   | 'STAFF_NOT_SERVICE'
-  | 'STAFF_HAS_ACTIVE_TABLE';
+  | 'STAFF_HAS_ACTIVE_TABLE'
+  // 대회 예약 (B-1)
+  | 'TOURNAMENT_LOCKED'
+  | 'TOURNAMENT_SCALE_UNAVAILABLE'
+  | 'TOURNAMENT_TABLE_COUNT'
+  | 'TOURNAMENT_TABLE_DUPLICATE'
+  | 'TOURNAMENT_TABLE_NOT_OPERATING'
+  | 'TOURNAMENT_TABLE_NO_DEALER'
+  | 'TOURNAMENT_TABLE_DEALER_PENDING'
+  | 'TOURNAMENT_DEALER_DUPLICATE'
+  | 'TOURNAMENT_ALREADY_RESERVED'
+  | 'TOURNAMENT_DAY_USED'
+  | 'TOURNAMENT_PARTICIPANTS_TOO_FEW'
+  | 'TOURNAMENT_RESERVE_SHORTFALL'
+  | 'REMODEL_IN_PROGRESS';
 
 export interface CommandResult {
   readonly ok: boolean;
@@ -229,6 +308,8 @@ export type EngineEvent =
   | { readonly type: 'sessionCompleted'; readonly sessionId: SessionId; readonly revenueUnits: Money }
   | { readonly type: 'dealerChangeApplied'; readonly tableId: TableId; readonly dealerId: StaffId | null }
   | { readonly type: 'unlockGranted'; readonly id: string }
+  | { readonly type: 'tournamentReserved'; readonly tournamentId: string; readonly tableIds: readonly TableId[]; readonly dealerIds: readonly StaffId[]; readonly prepCostUnits: Money }
+  | { readonly type: 'tournamentReady'; readonly tournamentId: string }
   | { readonly type: 'cashNegative'; readonly cash: Money };
 
 export interface TickResult {
@@ -248,6 +329,7 @@ export class UnsupportedStateError extends Error {
 }
 
 export type UnsupportedCode =
+  /** 준비 단계를 넘어선 대회 진행. 작업 B-2. */
   | 'TOURNAMENT_NOT_IMPLEMENTED'
   | 'REMODEL_NOT_IMPLEMENTED'
   | 'EMERGENCY_NOT_IMPLEMENTED'

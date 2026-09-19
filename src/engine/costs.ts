@@ -48,3 +48,12 @@ export function minuteCosts(state: GameState, config: EconomyConfig): MinuteCost
 
   return { wage, facility, venue, total: wage + facility + venue };
 }
+
+/**
+ * 현재 배치 기준 시간당 운영비 (내부 단위).
+ * 분당 비용 x 60. 새 상수를 만들지 않고 기존 비용 계산에서 파생한다.
+ * 대회 예약의 운영 예비금 검사가 쓴다.
+ */
+export function hourlyOperatingCostUnits(state: GameState, config: EconomyConfig): Money {
+  return minuteCosts(state, config).total * 60;
+}

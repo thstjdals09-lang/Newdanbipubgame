@@ -62,6 +62,7 @@ export function createInitialState(config: EconomyConfig = DEFAULT_CONFIG): Game
       nextStaffSeq: 2,
       nextSessionSeq: 1,
       nextLedgerSeq: 1,
+      nextTournamentSeq: 1,
     },
 
     window: {
@@ -93,7 +94,16 @@ export function cloneState(state: GameState): GameState {
     staff: state.staff.map((s) => ({ ...s })),
     sessions: state.sessions.map((s) => ({ ...s })),
     queue: state.queue.map((q) => ({ ...q })),
-    tournament: state.tournament,
+    // 예약 레코드는 깊게 복제한다. 얕게 두면 forecast의 두 분기가 같은
+    // 레코드를 공유해 phase 전환이 원본으로 새어 나간다.
+    tournament:
+      state.tournament === null
+        ? null
+        : {
+            ...state.tournament,
+            tableIds: [...state.tournament.tableIds],
+            dealerIds: [...state.tournament.dealerIds],
+          },
     remodel: state.remodel,
     emergency: state.emergency,
     unlocks: state.unlocks.map((u) => ({ ...u })),
@@ -116,11 +126,26 @@ export function cloneState(state: GameState): GameState {
  * 미구현 영역을 조용히 무시하지 않기 위한 관문이다 (사용자 요구 7).
  */
 export function assertSupported(state: GameState, config: EconomyConfig): void {
-  if (state.tournament !== null) {
-    throw new UnsupportedStateError(
-      'TOURNAMENT_NOT_IMPLEMENTED',
-      '대회 진행은 작업 B에서 구현한다. 이 상태로는 계산할 수 없다.',
-    );
+  const tournament = state.tournament;
+  if (tournament !== null) {
+    // B-1이 소유하는 준비 단계만 지원한다.
+    // 그 밖의 단계(대회 시작 이후)는 작업 B-2이므로 조용히 처리하지 않고 거절한다.
+    const supportedPhase =
+      tournament.phase === 'RESERVED_DRAINING' || tournament.phase === 'RESERVED_READY';
+    if (!supportedPhase) {
+      throw new UnsupportedStateError(
+        'TOURNAMENT_NOT_IMPLEMENTED',
+        '대회 진행은 작업 B-2에서 구현한다. 이 상태로는 계산할 수 없다. ' +
+          `지원하지 않는 단계: ${String(tournament.phase)}`,
+      );
+    }
+    if (tournament.scale !== 'small') {
+      throw new UnsupportedStateError(
+        'TOURNAMENT_NOT_IMPLEMENTED',
+        '대회 진행은 작업 B-2에서 구현한다. 이 상태로는 계산할 수 없다. ' +
+          `지원하지 않는 규모: ${String(tournament.scale)}`,
+      );
+    }
   }
   if (state.remodel !== null) {
     throw new UnsupportedStateError(
@@ -170,15 +195,45 @@ export function serialize(state: GameState): string {
   return JSON.stringify(state);
 }
 
-export function deserialize(json: string, config: EconomyConfig = DEFAULT_CONFIG): GameState {
-  const parsed = JSON.parse(json) as GameState;
+/**
+ * 저장 스키마 마이그레이션.
+ *
+ * v1 -> v2 (B-1): v1은 tournament가 항상 null이고 nextTournamentSeq가 없었다.
+ * v2에서 두 필드의 의미가 완전히 정의되므로 안전하게 옮길 수 있다.
+ *   tournament        null 유지 (v1에는 예약이 존재할 수 없었다)
+ *   nextTournamentSeq 1로 초기화 (아직 어떤 대회 ID도 발급된 적 없다)
+ * 경제 수치는 하나도 건드리지 않는다.
+ *
+ * 의미가 정의되지 않은 버전은 마이그레이션하지 않고 거절한다.
+ * 오래된 저장본을 조용히 버리거나 버전 검사를 우회하지 않는다.
+ */
+function migrateSave(raw: GameState): GameState {
+  if (raw.saveVersion === SAVE_VERSION) return raw;
 
-  if (parsed.saveVersion !== SAVE_VERSION) {
-    throw new UnsupportedStateError(
-      'SAVE_VERSION_MISMATCH',
-      `저장 스키마 버전 불일치: ${parsed.saveVersion} vs ${SAVE_VERSION}`,
-    );
+  if (raw.saveVersion === 1) {
+    const migrated = raw as GameState & { records: { nextTournamentSeq?: number } };
+    if (migrated.tournament != null) {
+      throw new UnsupportedStateError(
+        'SAVE_VERSION_MISMATCH',
+        'v1 저장본에 대회 예약이 들어 있다. v1은 예약을 표현할 수 없으므로 마이그레이션 의미가 정의되지 않는다.',
+      );
+    }
+    migrated.tournament = null;
+    if (migrated.records.nextTournamentSeq === undefined) {
+      migrated.records.nextTournamentSeq = 1;
+    }
+    migrated.saveVersion = SAVE_VERSION;
+    return migrated;
   }
+
+  throw new UnsupportedStateError(
+    'SAVE_VERSION_MISMATCH',
+    `저장 스키마 버전 불일치: ${raw.saveVersion} vs ${SAVE_VERSION} (정의된 마이그레이션 없음)`,
+  );
+}
+
+export function deserialize(json: string, config: EconomyConfig = DEFAULT_CONFIG): GameState {
+  const parsed = migrateSave(JSON.parse(json) as GameState);
   if (parsed.rulesVersion !== RULES_VERSION) {
     throw new UnsupportedStateError(
       'RULES_VERSION_MISMATCH',
@@ -201,5 +256,51 @@ export function deserialize(json: string, config: EconomyConfig = DEFAULT_CONFIG
   }
 
   assertInvariants(parsed);
+  assertReservationIntegrity(parsed);
   return parsed;
+}
+
+/**
+ * 예약 레코드와 실제 자원의 정합성 검사 (계약 8).
+ * 저장본이 대회·테이블·딜러·현금을 새로 만들어 내지 않았는지 확인한다.
+ */
+export function assertReservationIntegrity(state: GameState): void {
+  const t = state.tournament;
+  if (t === null) return;
+
+  if (t.tableIds.length !== t.dealerIds.length) {
+    throw new Error(`예약 ${t.id}: 테이블 ${t.tableIds.length}개와 딜러 ${t.dealerIds.length}명이 짝이 맞지 않음`);
+  }
+  if (new Set(t.tableIds).size !== t.tableIds.length) {
+    throw new Error(`예약 ${t.id}: 중복된 테이블 ID`);
+  }
+  if (new Set(t.dealerIds).size !== t.dealerIds.length) {
+    throw new Error(`예약 ${t.id}: 중복된 딜러 ID`);
+  }
+
+  t.tableIds.forEach((tableId, i) => {
+    const table = state.tables.find((x) => x.id === tableId);
+    if (!table) throw new Error(`예약 ${t.id}: 테이블 ${tableId}가 매장에 없음`);
+    if (table.status !== 'tournamentHeld') {
+      throw new Error(`예약 ${t.id}: 테이블 ${tableId}의 상태가 ${table.status}`);
+    }
+    const dealerId = t.dealerIds[i];
+    if (table.dealerId !== dealerId) {
+      throw new Error(`예약 ${t.id}: 테이블 ${tableId}의 담당 딜러가 ${String(table.dealerId)} (예약은 ${String(dealerId)})`);
+    }
+    const dealer = state.staff.find((x) => x.id === dealerId);
+    if (!dealer) throw new Error(`예약 ${t.id}: 딜러 ${String(dealerId)}가 명부에 없음`);
+    if (dealer.duty !== 'working' || dealer.assignedTableId !== tableId) {
+      throw new Error(`예약 ${t.id}: 딜러 ${String(dealerId)}의 배치가 예약과 다름`);
+    }
+  });
+
+  if (state.venue.lockedCash < t.prepCostUnits) {
+    throw new Error(
+      `예약 ${t.id}: 잠긴 금액 ${state.venue.lockedCash}가 준비비 ${t.prepCostUnits}보다 적음`,
+    );
+  }
+  if (!state.records.usedTournamentDays.includes(t.gameDay)) {
+    throw new Error(`예약 ${t.id}: 게임일 ${t.gameDay}의 개최권 소비 기록이 없음`);
+  }
 }

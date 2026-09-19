@@ -158,6 +158,20 @@ export function forecast(
   // 원본은 읽기만 한다. 아래 모든 진행은 복제본 위에서 일어난다.
   const before = snapshot(original, config);
 
+  // 대회 예약이 걸린 상태에서는 24게임시간 예측을 만들지 않는다.
+  // 예약은 준비 -> 시작 -> 진행 -> 정산으로 이어지는데 시작 이후는 작업 B-2다.
+  // 그대로 1,440분을 돌리면 "대회가 영영 시작되지 않고 테이블이 계속 비어 있다"는
+  // 사실이 아닌 전망을 내놓게 된다. 지어내지 않고 미지원을 돌려준다 (계약 7).
+  if (original.tournament !== null) {
+    return {
+      supported: false,
+      code: 'TOURNAMENT_NOT_IMPLEMENTED',
+      detail:
+        `대회 예약 ${original.tournament.id}(${original.tournament.phase}) 상태다. ` +
+        '대회 시작과 진행은 작업 B-2에서 구현하므로 이 구간의 24시간 예측은 신뢰할 수 없다.',
+    };
+  }
+
   const check = validateCommand(original, command, config);
   if (!check.ok) {
     const reason = check.reason as RejectReason;

@@ -24,6 +24,8 @@ import { assertSafeInteger } from './fixed.js';
 import { processSeating } from './seating.js';
 import { recordWindow, stepSatisfaction } from './satisfaction.js';
 import { assertInvariants, assertSupported, cloneState } from './state.js';
+import { updateTournamentPhase } from './tournament.js';
+import { UnsupportedStateError } from './types.js';
 import type { Command, EngineEvent, GameState, TickResult } from './types.js';
 
 /** 틱 9단계: 해금 판정. 같은 해금은 기록 ID로 한 번만 부여한다 (Progression §4). */
@@ -107,7 +109,11 @@ export function tick(
   // 2) 시각 진행
   state.time.minute += 1;
 
-  // 3) 대회 — 작업 B. assertSupported가 tournament === null을 보장한다.
+  // 3) 대회 준비 완료 판정 (B-1). 대회 시작·정산은 작업 B-2다.
+  //    Economy §10이 지정한 자리를 그대로 지킨다. 4단계 정산보다 앞이므로
+  //    마지막 일반 세션이 분 M에 정산되면 준비 완료는 분 M+1에 확인된다.
+  //    문서 §10 말미가 이 지연을 명시적으로 예고하고 있다.
+  updateTournamentPhase(state, events);
 
   // 4) 세션 정산. settled 플래그로 단일 정산을 보장한다.
   let completedThisMinute = 0;
@@ -159,8 +165,19 @@ export function tick(
   state.records.totalFacilityUnits += costs.facility;
   state.records.totalVenueCostUnits += costs.venue;
 
+  if (state.venue.cash - state.venue.lockedCash < 0 && state.venue.lockedCash > 0) {
+    // 반복 비용이 잠긴 자금을 잠식하기 시작했다.
+    // 완성된 게임이라면 긴급 축소 운영(Economy §11)이 발동하는 구간이지만
+    // 그 규칙은 작업 B-3이다. 잠긴 돈을 쓰거나 음수를 잘라내지 않고 명시적으로 멈춘다.
+    throw new UnsupportedStateError(
+      'EMERGENCY_NOT_IMPLEMENTED',
+      `잠긴 자금을 잠식하는 상태다 (cash=${state.venue.cash}, locked=${state.venue.lockedCash}). ` +
+        '긴급 축소 운영은 작업 B-3에서 구현한다.',
+    );
+  }
+
   if (state.venue.cash < 0) {
-    // 긴급 축소 운영은 작업 B다. 조용히 0으로 자르지 않고 사실대로 알린다.
+    // 잠긴 자금이 없는 경우의 기존 동작. 조용히 0으로 자르지 않고 사실대로 알린다.
     events.push({ type: 'cashNegative', cash: state.venue.cash });
   }
 

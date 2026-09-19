@@ -180,6 +180,23 @@ export interface EconomyConfig {
   };
 
   /**
+   * [채택 — 잠정 밸런스] 대회 예약 시 요구하는 운영 예비금 (게임 시간).
+   *
+   * Economy §8("준비비 지급 후 운영 예비금 확보를 검사한다")과
+   * Progression §3("대회와 리모델링의 운영 예비금 조건은 별도 필수 검사다")이
+   * 필수 검사로 지정했으나 수치가 없던 항목이다. 05 채택기록 R10에서
+   * **4게임시간**으로 채택했다. 잠정 밸런스 값이며 조정 대상이다.
+   *
+   * 예약 자격: 사용 가능 현금 >= 준비비 + 현재 시간당 운영비 x 4
+   *
+   * 적용 범위는 **대회 예약뿐이다.** 일반 구매의 4게임시간 경고(Progression §3)와
+   * 리모델링의 `4 x C_after` 공식(Progression §5)은 건드리지 않는다.
+   *
+   * null이면 예비금 항을 요구하지 않는다(미채택 상태 표현용).
+   */
+  readonly tournamentOperatingReserveHours: number | null;
+
+  /**
    * 실험용: 수요 피드백을 끊고 고정 수요를 쓴다.
    * 04 §1의 "수요와 인지도 변화를 고정해 처리 능력의 효과만 분리" 재현용.
    * 게임 플레이용 값이 아니며 null이 기본이다.
@@ -188,8 +205,26 @@ export interface EconomyConfig {
 }
 
 /** 05 채택기록 v1 §7 */
+
+/**
+ * 계산 순서·공식·반올림 규칙의 버전.
+ *
+ * B-1에서 올리지 않았다. 대회 예약은 새로운 상태를 추가했을 뿐
+ * 수요·착석·만족도·매출·비용의 공식과 Economy §10의 9단계 순서를 바꾸지 않았다.
+ * 예약이 없는 상태(tournament === null)의 모든 계산 결과는 이전과 비트 단위로 같고,
+ * 기존 시간 분할·저장 복원·검산 재현 테스트가 그것을 검증한다.
+ */
 export const RULES_VERSION = 'economy-0.1+adopt-v1';
-export const SAVE_VERSION = 1;
+
+/**
+ * 직렬화 스키마 버전.
+ *
+ * 1 -> 2 (B-1): GameState.tournament가 null 전용에서 예약 레코드를 담을 수 있게 되었고
+ * records.nextTournamentSeq가 추가됐다. 05 §7의 "상태 필드가 추가될 때" 규칙에 해당한다.
+ * v1 저장본은 tournament가 항상 null이고 nextTournamentSeq가 없으므로
+ * 마이그레이션 의미가 완전히 정의된다 (migrateSave 참조).
+ */
+export const SAVE_VERSION = 2;
 
 export const DEFAULT_CONFIG: EconomyConfig = {
   rulesVersion: RULES_VERSION,
@@ -327,6 +362,9 @@ export const DEFAULT_CONFIG: EconomyConfig = {
     smallTournamentAwarenessMilli: milli(10),
     skilledDealerTableCount: 3,
   },
+
+  // 채택 (잠정). 05 채택기록 R10 참조.
+  tournamentOperatingReserveHours: 4,
 
   fixedDemandMilliPerHour: null,
 };

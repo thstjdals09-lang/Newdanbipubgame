@@ -19,6 +19,7 @@ import {
   installedTableCount,
   tablePriceGold,
 } from './derive.js';
+import { applyReservation, isDealerReserved, planSmallTournament } from './tournament.js';
 import type {
   Command,
   CommandResult,
@@ -113,6 +114,10 @@ export function validateCommand(
     case 'setStaffStandby': {
       const staff = findStaff(state, command.staffId);
       if (!staff) return no('STAFF_NOT_FOUND');
+      if (isDealerReserved(state, staff.id)) {
+        // 예약된 딜러는 조용히 풀리지 않는다 (계약 4).
+        return no('STAFF_HAS_ACTIVE_TABLE', '대회 예약에 묶인 딜러다');
+      }
       if (staff.type !== 'service' && staff.assignedTableId !== null) {
         // 딜러는 테이블에서 먼저 떼어내야 한다. 조용히 빼오지 않는다 (채택 R9).
         return no('STAFF_HAS_ACTIVE_TABLE', '먼저 unassignDealer로 테이블에서 해제해야 한다');
@@ -137,6 +142,12 @@ export function validateCommand(
       if (costGold === undefined) return no('AMENITY_MAX_LEVEL');
       if (gold(costGold) > cash) return no('INSUFFICIENT_CASH');
       return ok;
+    }
+
+    case 'reserveSmallTournament': {
+      // 자격 판정은 tournament.ts가 단독으로 소유한다.
+      // 검증과 적용이 같은 함수를 쓰므로 규칙이 갈라질 수 없다 (계약 2).
+      return planSmallTournament(state, command.tableIds, config).result;
     }
 
     case 'buyPromotion': {
@@ -267,6 +278,15 @@ export function applyCommand(
       if (costGold === undefined) throw new Error('upgradeAmenity: 검증을 통과하지 않은 명령');
       spend(state, gold(costGold), `amenity:L${next}`);
       state.venue.amenityLevel = next;
+      return;
+    }
+
+    case 'reserveSmallTournament': {
+      const { result, plan } = planSmallTournament(state, command.tableIds, config);
+      if (!result.ok || !plan) {
+        throw new Error('reserveSmallTournament: 검증을 통과하지 않은 명령');
+      }
+      applyReservation(state, plan, events);
       return;
     }
 
