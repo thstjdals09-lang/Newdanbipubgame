@@ -13,14 +13,14 @@
 
 import { DEFAULT_CONFIG, MONEY_SCALE } from '../config/economy.js';
 import type { EconomyConfig } from '../config/economy.js';
-import { validateCommand } from './commands.js';
+import { applyCommand, validateCommand } from './commands.js';
 import {
   availableCash,
   demandPerHourMilli,
   operatingTableCount,
   theoreticalCapacityMilli,
 } from './derive.js';
-import { cloneState } from './state.js';
+import { assertSupported, cloneState } from './state.js';
 import { tick } from './tick.js';
 import { UnsupportedStateError } from './types.js';
 import type {
@@ -151,6 +151,10 @@ export function forecast(
   config: EconomyConfig = DEFAULT_CONFIG,
   horizonMinutes: number = DEFAULT_HORIZON_MINUTES,
 ): ForecastResult {
+  if (!Number.isSafeInteger(horizonMinutes) || horizonMinutes < 1) {
+    throw new RangeError(`forecast: 예측 분이 올바르지 않음 (${horizonMinutes})`);
+  }
+
   // 원본은 읽기만 한다. 아래 모든 진행은 복제본 위에서 일어난다.
   const before = snapshot(original, config);
 
@@ -166,60 +170,30 @@ export function forecast(
   }
 
   try {
+    assertSupported(original, config);
     const baselineStart = cloneState(original);
     const investedStart = cloneState(original);
 
-    // 투자 분기: 명령을 1단계에서 반영하는 첫 틱을 먼저 돌린다.
-    const first = tick(investedStart, config, [command]);
-    if (first.events.some((e) => e.type === 'commandRejected')) {
-      return {
-        supported: false,
-        code: 'COMMAND_REJECTED',
-        detail: '복제본에서 명령이 거절됨',
-      };
-    }
-
-    const cashAfterInvest = first.state.venue.cash;
+    // 명령은 게임 분 경계에서 즉시 적용한다. 아직 게임 시간/방문/세션/급여는 진행하지 않는다.
+    // tick()도 같은 applyCommand를 1단계에서 호출하므로 실제 영업 결과와 규칙을 공유한다.
+    applyCommand(investedStart, command, config, []);
     const investmentCostUnits =
-      first.state.records.totalOneOffUnits - original.records.totalOneOffUnits;
-
-    // 투자 직후 스냅샷은 첫 틱 종료 시점의 값이다.
-    const after = snapshot(first.state, config);
+      investedStart.records.totalOneOffUnits - original.records.totalOneOffUnits;
+    const after = snapshot(investedStart, config);
 
     const delays: ForecastDelayReason[] = [];
-    if (first.state.tables.some((t) => t.pendingDealerId !== undefined)) {
+    if (investedStart.tables.some((t) => t.pendingDealerId !== undefined)) {
       delays.push('DEALER_CHANGE_PENDING');
     }
-    if (first.state.tables.some((t) => t.status === 'idle')) {
+    if (investedStart.tables.some((t) => t.status === 'idle')) {
       delays.push('TABLE_WITHOUT_DEALER');
     }
 
     const baselineRun = run(baselineStart, horizonMinutes, config);
-    // 투자 분기는 첫 틱을 이미 썼으므로 남은 분만 진행한다.
-    const investedRun = run(first.state, horizonMinutes - 1, config);
-
-    // run()은 각 분기의 시작 시점 누적값을 기준으로 삼는다.
-    // 투자 분기의 첫 틱은 run() 밖에서 돌았으므로 그 1분치를 더해준다.
-    const firstMinuteRevenue =
-      first.state.records.totalRevenueUnits - original.records.totalRevenueUnits;
-    const firstMinuteRecurring =
-      first.state.records.totalWageUnits +
-      first.state.records.totalFacilityUnits +
-      first.state.records.totalVenueCostUnits -
-      (original.records.totalWageUnits +
-        original.records.totalFacilityUnits +
-        original.records.totalVenueCostUnits);
-    const firstMinuteGuests =
-      first.state.records.completedGuests - original.records.completedGuests;
-
-    const invested: ForecastBranch = {
-      revenueUnits: investedRun.branch.revenueUnits + firstMinuteRevenue,
-      recurringCostUnits: investedRun.branch.recurringCostUnits + firstMinuteRecurring,
-      operatingNetUnits:
-        investedRun.branch.operatingNetUnits + firstMinuteRevenue - firstMinuteRecurring,
-      completedGuests: investedRun.branch.completedGuests + firstMinuteGuests,
-      endCashUnits: investedRun.branch.endCashUnits,
-    };
+    // 양쪽 모두 정확히 같은 기간을 돌린다. 투자 분기는 명령만 미리 적용했으므로
+    // 첫 틱의 현금 부족, 영업 매출, 반복 비용도 run()에서 빠짐없이 검사/집계된다.
+    const investedRun = run(investedStart, horizonMinutes, config);
+    const invested = investedRun.branch;
 
     if (baselineRun.cashWentNegative || investedRun.cashWentNegative) {
       return {
@@ -243,7 +217,7 @@ export function forecast(
       supported: true,
       horizonMinutes,
       immediateBefore: before,
-      immediateAfter: { ...after, cashUnits: cashAfterInvest },
+      immediateAfter: after,
       investmentCostUnits,
       baseline: baselineRun.branch,
       invested,

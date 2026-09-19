@@ -202,9 +202,9 @@ describe('일회성 투자 비용과 반복 비용을 구분한다 (Economy §9)
     const result = forecast(state, { type: 'buyTable' }, config);
     if (!result.supported) throw new Error('지원되는 상태여야 한다');
 
-    // 첫 틱에는 구매 비용과 1분치 반복 비용이 함께 빠진다
+    // 투자 직후에는 1분치 운영비가 아직 차감되지 않아야 한다.
     const spent = result.immediateBefore.cashUnits - result.immediateAfter.cashUnits;
-    expect(spent).toBeGreaterThanOrEqual(gold(1200));
+    expect(spent).toBe(gold(1200));
   });
 
   it('회수 시간은 추가 순이익이 양수일 때만 나온다', () => {
@@ -289,5 +289,52 @@ describe('미구현 상태는 명시적 미지원으로 돌려준다 (사용자 
     if (result.supported) throw new Error('unreachable');
     expect(result.code).toBe('COMMAND_REJECTED');
     expect(result.reason).toBe('AMENITY_LOCKED');
+  });
+});
+
+
+describe('투자 예상치 경계 시점과 첫 1분 안전성 회귀 검증', () => {
+  const config = fixedDemandConfig(20);
+
+  it('투자 직후 현금은 구매 비용만 차감하며 아직 1분 영업 결과를 포함하지 않는다', () => {
+    const state = withSpareDealer(labState({ tables: 1, dealers: 1, cashGold: 50_000 }, config));
+    const before = serialize(state);
+    const command = { type: 'buyTable' } as const;
+    const result = forecast(state, command, config, 2);
+    if (!result.supported) throw new Error('지원되는 상태여야 한다');
+
+    expect(result.immediateBefore.cashUnits).toBe(state.venue.cash);
+    expect(result.immediateAfter.cashUnits).toBe(state.venue.cash - gold(1200));
+    expect(result.immediateAfter.availableCashUnits).toBe(state.venue.cash - gold(1200));
+    expect(result.immediateAfter.operatingTables).toBe(2);
+
+    const afterOneMinute = tick(state, config, [command]).state;
+    expect(afterOneMinute.venue.cash).toBeLessThan(result.immediateAfter.cashUnits);
+    expect(serialize(state)).toBe(before);
+  });
+
+  it('첫 틱에서만 잔액이 음수이고 다음 틱에 매출로 회복되어도 예측을 거부한다', () => {
+    // 고정 수요 20: 최초 방문이 분 3, 최초 세션 완료가 분 123이다.
+    // 분 121 시점에 테이블 구매비만 남겨 분 122에 일시적으로 적자가 나게 한다.
+    let state = run(labState({ tables: 1, dealers: 1, cashGold: 50_000 }, config), 121, config);
+    state = withSpareDealer(state);
+    state.venue.cash = gold(1200);
+
+    const command = { type: 'buyTable' } as const;
+    const first = tick(state, config, [command]);
+    expect(first.events.some((event) => event.type === 'cashNegative')).toBe(true);
+    const second = tick(first.state, config);
+    expect(second.state.venue.cash).toBeGreaterThanOrEqual(0);
+
+    const result = forecast(state, command, config, 2);
+    expect(result.supported).toBe(false);
+    if (result.supported) throw new Error('현금 부족 시 예측을 지원하면 안 된다');
+    expect(result.code).toBe('CASH_WENT_NEGATIVE');
+  });
+
+  it('0분 또는 소수 분 지평으로 예상치를 생성하지 않는다', () => {
+    const state = labState({ tables: 1, dealers: 1, cashGold: 50_000 }, config);
+    expect(() => forecast(state, { type: 'hireDealer' }, config, 0)).toThrow(RangeError);
+    expect(() => forecast(state, { type: 'hireDealer' }, config, 1.5)).toThrow(RangeError);
   });
 });
