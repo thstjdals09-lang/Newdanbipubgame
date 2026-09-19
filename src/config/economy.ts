@@ -220,11 +220,18 @@ export const RULES_VERSION = 'economy-0.1+adopt-v1';
  * 직렬화 스키마 버전.
  *
  * 1 -> 2 (B-1): GameState.tournament가 null 전용에서 예약 레코드를 담을 수 있게 되었고
- * records.nextTournamentSeq가 추가됐다. 05 §7의 "상태 필드가 추가될 때" 규칙에 해당한다.
- * v1 저장본은 tournament가 항상 null이고 nextTournamentSeq가 없으므로
- * 마이그레이션 의미가 완전히 정의된다 (migrateSave 참조).
+ * records.nextTournamentSeq가 추가됐다.
+ *
+ * 2 -> 3 (B-2A): 대회 진행·정산 상태가 추가됐다.
+ *   TournamentReservation.startedAtMinute / endsAtMinute
+ *   records.totalTournamentRevenueUnits
+ *   records.completedTournaments
+ * 05 §7의 "상태 필드가 추가될 때" 규칙에 해당한다.
+ *
+ * 두 마이그레이션 모두 의미가 완전히 정의된다 (state.ts의 migrateSave 참조).
+ * v2가 담을 수 있던 대회 상태(없음 / DRAINING / READY)는 그대로 보존한다.
  */
-export const SAVE_VERSION = 2;
+export const SAVE_VERSION = 3;
 
 export const DEFAULT_CONFIG: EconomyConfig = {
   rulesVersion: RULES_VERSION,

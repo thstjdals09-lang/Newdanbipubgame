@@ -63,6 +63,8 @@ export function createInitialState(config: EconomyConfig = DEFAULT_CONFIG): Game
       nextSessionSeq: 1,
       nextLedgerSeq: 1,
       nextTournamentSeq: 1,
+      totalTournamentRevenueUnits: 0,
+      completedTournaments: [],
     },
 
     window: {
@@ -110,6 +112,11 @@ export function cloneState(state: GameState): GameState {
     records: {
       ...state.records,
       usedTournamentDays: [...state.records.usedTournamentDays],
+      completedTournaments: state.records.completedTournaments.map((c) => ({
+        ...c,
+        tableIds: [...c.tableIds],
+        dealerIds: [...c.dealerIds],
+      })),
     },
     window: {
       arrivals: [...state.window.arrivals],
@@ -131,7 +138,9 @@ export function assertSupported(state: GameState, config: EconomyConfig): void {
     // B-1이 소유하는 준비 단계만 지원한다.
     // 그 밖의 단계(대회 시작 이후)는 작업 B-2이므로 조용히 처리하지 않고 거절한다.
     const supportedPhase =
-      tournament.phase === 'RESERVED_DRAINING' || tournament.phase === 'RESERVED_READY';
+      tournament.phase === 'RESERVED_DRAINING' ||
+      tournament.phase === 'RESERVED_READY' ||
+      tournament.phase === 'IN_PROGRESS';
     if (!supportedPhase) {
       throw new UnsupportedStateError(
         'TOURNAMENT_NOT_IMPLEMENTED',
@@ -196,40 +205,85 @@ export function serialize(state: GameState): string {
 }
 
 /**
- * 저장 스키마 마이그레이션.
+ * 저장 스키마 마이그레이션. **한 버전씩 체인으로 올린다.**
  *
  * v1 -> v2 (B-1): v1은 tournament가 항상 null이고 nextTournamentSeq가 없었다.
- * v2에서 두 필드의 의미가 완전히 정의되므로 안전하게 옮길 수 있다.
  *   tournament        null 유지 (v1에는 예약이 존재할 수 없었다)
  *   nextTournamentSeq 1로 초기화 (아직 어떤 대회 ID도 발급된 적 없다)
- * 경제 수치는 하나도 건드리지 않는다.
  *
- * 의미가 정의되지 않은 버전은 마이그레이션하지 않고 거절한다.
+ * v2 -> v3 (B-2A): 대회 진행·정산 상태가 추가됐다.
+ *   records.totalTournamentRevenueUnits  0으로 초기화 (v2는 참가비를 인식한 적이 없다)
+ *   records.completedTournaments         [] 로 초기화 (v2는 대회를 완료한 적이 없다)
+ *   tournament.startedAtMinute/endsAtMinute  null (v2 예약은 시작한 적이 없다)
+ *
+ * v2가 담을 수 있던 대회 상태는 "없음 / RESERVED_DRAINING / RESERVED_READY"뿐이다.
+ * 세 경우 모두 그대로 보존한다. READY 예약은 READY로 이어지며 완료로 오인하지 않는다.
+ * 예약 테이블·딜러 ID, 잠긴 금액, 소비한 개최권은 건드리지 않는다.
+ *
+ * 경제 수치는 하나도 바꾸지 않는다.
+ * 의미가 정의되지 않은 버전이나 그 버전이 표현할 수 없는 상태는 거절한다.
  * 오래된 저장본을 조용히 버리거나 버전 검사를 우회하지 않는다.
  */
-function migrateSave(raw: GameState): GameState {
-  if (raw.saveVersion === SAVE_VERSION) return raw;
+function migrateV1ToV2(raw: GameState): GameState {
+  const migrated = raw as GameState & { records: { nextTournamentSeq?: number } };
+  if (migrated.tournament != null) {
+    throw new UnsupportedStateError(
+      'SAVE_VERSION_MISMATCH',
+      'v1 저장본에 대회 예약이 들어 있다. v1은 예약을 표현할 수 없으므로 마이그레이션 의미가 정의되지 않는다.',
+    );
+  }
+  migrated.tournament = null;
+  if (migrated.records.nextTournamentSeq === undefined) {
+    migrated.records.nextTournamentSeq = 1;
+  }
+  migrated.saveVersion = 2;
+  return migrated;
+}
 
-  if (raw.saveVersion === 1) {
-    const migrated = raw as GameState & { records: { nextTournamentSeq?: number } };
-    if (migrated.tournament != null) {
+function migrateV2ToV3(raw: GameState): GameState {
+  const migrated = raw as GameState & {
+    records: {
+      totalTournamentRevenueUnits?: number;
+      completedTournaments?: GameState['records']['completedTournaments'];
+    };
+  };
+
+  const t = migrated.tournament;
+  if (t != null) {
+    if (t.phase !== 'RESERVED_DRAINING' && t.phase !== 'RESERVED_READY') {
       throw new UnsupportedStateError(
         'SAVE_VERSION_MISMATCH',
-        'v1 저장본에 대회 예약이 들어 있다. v1은 예약을 표현할 수 없으므로 마이그레이션 의미가 정의되지 않는다.',
+        `v2 저장본이 표현할 수 없는 대회 단계다: ${String(t.phase)}. 마이그레이션 의미가 정의되지 않는다.`,
       );
     }
-    migrated.tournament = null;
-    if (migrated.records.nextTournamentSeq === undefined) {
-      migrated.records.nextTournamentSeq = 1;
-    }
-    migrated.saveVersion = SAVE_VERSION;
-    return migrated;
+    // v2 예약은 시작한 적이 없다. 두 시각은 null이 유일하게 옳은 값이다.
+    t.startedAtMinute = null;
+    t.endsAtMinute = null;
   }
 
-  throw new UnsupportedStateError(
-    'SAVE_VERSION_MISMATCH',
-    `저장 스키마 버전 불일치: ${raw.saveVersion} vs ${SAVE_VERSION} (정의된 마이그레이션 없음)`,
-  );
+  if (migrated.records.totalTournamentRevenueUnits === undefined) {
+    migrated.records.totalTournamentRevenueUnits = 0;
+  }
+  if (migrated.records.completedTournaments === undefined) {
+    migrated.records.completedTournaments = [];
+  }
+  migrated.saveVersion = 3;
+  return migrated;
+}
+
+function migrateSave(raw: GameState): GameState {
+  let current = raw;
+
+  if (current.saveVersion === 1) current = migrateV1ToV2(current);
+  if (current.saveVersion === 2) current = migrateV2ToV3(current);
+
+  if (current.saveVersion !== SAVE_VERSION) {
+    throw new UnsupportedStateError(
+      'SAVE_VERSION_MISMATCH',
+      `저장 스키마 버전 불일치: ${raw.saveVersion} vs ${SAVE_VERSION} (정의된 마이그레이션 없음)`,
+    );
+  }
+  return current;
 }
 
 export function deserialize(json: string, config: EconomyConfig = DEFAULT_CONFIG): GameState {
@@ -265,8 +319,42 @@ export function deserialize(json: string, config: EconomyConfig = DEFAULT_CONFIG
  * 저장본이 대회·테이블·딜러·현금을 새로 만들어 내지 않았는지 확인한다.
  */
 export function assertReservationIntegrity(state: GameState): void {
+  // 완료 기록 자체의 무결성부터 본다.
+  const completedIds = state.records.completedTournaments.map((c) => c.id);
+  if (new Set(completedIds).size !== completedIds.length) {
+    throw new Error('완료된 대회 기록에 중복 ID가 있다');
+  }
+
   const t = state.tournament;
   if (t === null) return;
+
+  // 활성 예약이 이미 완료된 대회와 같은 ID면 중복 정산이 가능해진다.
+  if (completedIds.includes(t.id)) {
+    throw new Error(`예약 ${t.id}: 이미 완료 기록이 있는 대회가 활성 예약으로 남아 있다`);
+  }
+
+  // 단계별로 시각 필드가 앞뒤가 맞아야 한다.
+  if (t.phase === 'IN_PROGRESS') {
+    if (t.startedAtMinute === null || t.endsAtMinute === null) {
+      throw new Error(`예약 ${t.id}: 진행 중인데 시작·종료 시각이 없다`);
+    }
+    if (t.endsAtMinute <= t.startedAtMinute) {
+      throw new Error(`예약 ${t.id}: 종료 시각이 시작 시각보다 앞선다`);
+    }
+    if (t.readyAtMinute === null || t.readyAtMinute >= t.startedAtMinute) {
+      throw new Error(`예약 ${t.id}: 준비 완료 시각이 시작 시각보다 앞서지 않는다`);
+    }
+  } else {
+    if (t.startedAtMinute !== null || t.endsAtMinute !== null) {
+      throw new Error(`예약 ${t.id}: 시작 전인데 시작·종료 시각이 채워져 있다`);
+    }
+    if (t.phase === 'RESERVED_READY' && t.readyAtMinute === null) {
+      throw new Error(`예약 ${t.id}: 준비 완료 상태인데 그 시각이 없다`);
+    }
+    if (t.phase === 'RESERVED_DRAINING' && t.readyAtMinute !== null) {
+      throw new Error(`예약 ${t.id}: 정리 중인데 준비 완료 시각이 채워져 있다`);
+    }
+  }
 
   if (t.tableIds.length !== t.dealerIds.length) {
     throw new Error(`예약 ${t.id}: 테이블 ${t.tableIds.length}개와 딜러 ${t.dealerIds.length}명이 짝이 맞지 않음`);

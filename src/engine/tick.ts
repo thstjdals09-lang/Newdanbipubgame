@@ -24,7 +24,7 @@ import { assertSafeInteger } from './fixed.js';
 import { processSeating } from './seating.js';
 import { recordWindow, stepSatisfaction } from './satisfaction.js';
 import { assertInvariants, assertSupported, cloneState } from './state.js';
-import { updateTournamentPhase } from './tournament.js';
+import { processTournament } from './tournament.js';
 import { UnsupportedStateError } from './types.js';
 import type { Command, EngineEvent, GameState, TickResult } from './types.js';
 
@@ -109,11 +109,11 @@ export function tick(
   // 2) 시각 진행
   state.time.minute += 1;
 
-  // 3) 대회 준비 완료 판정 (B-1). 대회 시작·정산은 작업 B-2다.
-  //    Economy §10이 지정한 자리를 그대로 지킨다. 4단계 정산보다 앞이므로
-  //    마지막 일반 세션이 분 M에 정산되면 준비 완료는 분 M+1에 확인된다.
-  //    문서 §10 말미가 이 지연을 명시적으로 예고하고 있다.
-  updateTournamentPhase(state, events);
+  // 3) 대회 처리: 종료 정산 -> 시작 -> 준비 완료 판정 (B-1 + B-2A).
+  //    Economy §10이 지정한 자리를 그대로 지킨다. 4단계 세션 정산보다 앞이므로
+  //    마지막 일반 세션이 분 M에 정산되면 준비 완료는 분 M+1에 확인되고,
+  //    그 대회의 시작은 다시 그다음 3단계 평가에서 일어난다.
+  processTournament(state, config, events);
 
   // 4) 세션 정산. settled 플래그로 단일 정산을 보장한다.
   let completedThisMinute = 0;

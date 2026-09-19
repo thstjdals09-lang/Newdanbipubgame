@@ -109,12 +109,15 @@ export type TournamentScale = 'small' | 'mid';
  *                      기존 세션이 끝나기를 기다린다 (Economy §8 진행순서 2).
  *   RESERVED_READY     선택 테이블의 기존 일반 세션이 모두 정산됐다.
  *                      **대회가 시작된 상태가 아니다.**
+ *   IN_PROGRESS        대회가 시작되어 종료 예정 시각까지 진행 중이다 (B-2A).
  *
- * RESERVED_READY 다음(대회 시작·진행 시간 계산·정산·자원 해제)은 전부 작업 B-2다.
- * B-2가 단계를 추가하면 여기에 이어 붙이고, assertSupported가 새 단계를
- * 미지원으로 걸러내므로 B-1 코드가 B-2 상태를 조용히 처리하는 일은 없다.
+ * 완료되면 레코드가 records.completedTournaments로 옮겨지고
+ * GameState.tournament는 null이 된다. 완료된 대회가 다음 예약을 영구히
+ * 막지 않게 하기 위해서다.
+ *
+ * 중규모 대회 진행과 대회 인지 투자 예상치는 여전히 후속 B-2 범위다.
  */
-export type TournamentPhase = 'RESERVED_DRAINING' | 'RESERVED_READY';
+export type TournamentPhase = 'RESERVED_DRAINING' | 'RESERVED_READY' | 'IN_PROGRESS';
 
 /**
  * 대회 예약 레코드. **권위 있는 유일한 저장소다.**
@@ -138,8 +141,40 @@ export interface TournamentReservation {
   /** floor(경과 게임분 / minutesPerGameDay) */
   readonly gameDay: number;
   readonly reservedAtMinute: GameMinute;
-  /** RESERVED_READY로 바뀐 시각. B-2가 진행 시작 시점으로 쓴다. */
+  /** RESERVED_READY로 바뀐 시각. 시작 판정이 "같은 분에 준비된 대회"를 거르는 데 쓴다. */
   readyAtMinute: GameMinute | null;
+  /** IN_PROGRESS로 바뀐 시각. 그 전에는 null. */
+  startedAtMinute: GameMinute | null;
+  /**
+   * 종료 예정 시각. 시작 시 확정한다.
+   * 상태에 저장하므로 틱을 몇 번에 나눠 돌리거나 저장·복원해도
+   * 완료 시점이 달라지지 않는다.
+   */
+  endsAtMinute: GameMinute | null;
+}
+
+/**
+ * 완료된 대회의 영구 기록.
+ *
+ * 저장·복원 뒤 같은 대회가 두 번 정산되지 않게 하는 신원이다.
+ * GameState.tournament는 완료와 동시에 null이 되므로, 중복 방지는
+ * 이 목록의 id 유일성으로 보장한다.
+ */
+export interface TournamentCompletionRecord {
+  readonly id: string;
+  readonly scale: TournamentScale;
+  readonly participants: number;
+  readonly gameDay: number;
+  readonly startedAtMinute: GameMinute;
+  readonly completedAtMinute: GameMinute;
+  /** 비용으로 확정한 준비비 (잠금 해제와 동시에 지출 처리) */
+  readonly prepCostUnits: Money;
+  /** 인식한 참가비 수입 */
+  readonly entryFeeUnits: Money;
+  /** 실제로 반영된 인지도 증가분. 상한 100에 걸리면 요청값보다 작다. */
+  readonly awarenessGainedMilli: Milli;
+  readonly tableIds: readonly TableId[];
+  readonly dealerIds: readonly StaffId[];
 }
 
 export interface UnlockRecord {
@@ -229,6 +264,20 @@ export interface GameState {
     nextSessionSeq: number;
     nextLedgerSeq: number;
     nextTournamentSeq: number;
+
+    /**
+     * 대회 참가비 수입 누계.
+     *
+     * **일반 세션 매출(totalRevenueUnits)과 반드시 분리한다.**
+     * 기존 검산·회귀 테스트가 `totalRevenueUnits === completedGuests x 200G`를
+     * 불변식으로 쓰고 있으므로, 참가비를 그쪽에 더하면 그 의미가 깨진다.
+     * venue.cash는 두 계정을 모두 반영하는 단일 잔액이므로
+     * 두 번째 독립 잔액이 생기지 않는다.
+     */
+    totalTournamentRevenueUnits: Money;
+
+    /** 완료된 대회 기록. 중복 정산 방지의 신원이다. */
+    completedTournaments: TournamentCompletionRecord[];
   };
 
   window: AbandonWindow;
@@ -310,6 +359,8 @@ export type EngineEvent =
   | { readonly type: 'unlockGranted'; readonly id: string }
   | { readonly type: 'tournamentReserved'; readonly tournamentId: string; readonly tableIds: readonly TableId[]; readonly dealerIds: readonly StaffId[]; readonly prepCostUnits: Money }
   | { readonly type: 'tournamentReady'; readonly tournamentId: string }
+  | { readonly type: 'tournamentStarted'; readonly tournamentId: string; readonly startedAtMinute: GameMinute; readonly endsAtMinute: GameMinute }
+  | { readonly type: 'tournamentCompleted'; readonly tournamentId: string; readonly prepCostUnits: Money; readonly entryFeeUnits: Money; readonly awarenessGainedMilli: Milli }
   | { readonly type: 'cashNegative'; readonly cash: Money };
 
 export interface TickResult {

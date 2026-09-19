@@ -53,6 +53,32 @@ const demandConfig = fixedDemandConfig(20);
 
 const RESERVE: Command = { type: 'reserveSmallTournament', tableIds: ['T1', 'T2'] };
 
+/** 지정한 단계에 도달할 때까지 진행한다. 도달하지 못하면 실패시킨다. */
+function runUntilPhase(
+  start: GameState,
+  phase: 'RESERVED_DRAINING' | 'RESERVED_READY' | 'IN_PROGRESS',
+  config: EconomyConfig,
+  limit = 2000,
+): GameState {
+  let cur = start;
+  for (let i = 0; i < limit; i += 1) {
+    if (cur.tournament?.phase === phase) return cur;
+    cur = tick(cur, config).state;
+  }
+  throw new Error(`단계 ${phase}에 도달하지 못했다`);
+}
+
+/** 대회가 완료될 때까지 진행한다. 완료 시점의 상태를 돌려준다. */
+function runUntilCompleted(start: GameState, config: EconomyConfig, limit = 2000): GameState {
+  let cur = start;
+  for (let i = 0; i < limit; i += 1) {
+    const r = tick(cur, config);
+    cur = r.state;
+    if (r.events.some((e) => e.type === 'tournamentCompleted')) return cur;
+  }
+  throw new Error('대회가 완료되지 않았다');
+}
+
 describe('T01 정상 예약', () => {
   it('예약이 하나의 명령으로 적용되고 필요한 정보가 모두 담긴다', () => {
     const state = reservableState(demandConfig);
@@ -255,7 +281,10 @@ describe('T07 예약 테이블에 신규 착석이 없다', () => {
     applyCommand(state, RESERVE, demandConfig, []);
     const startedBefore = new Set(state.sessions.map((s) => s.id));
 
-    const later = run(state, 600, demandConfig);
+    // 대회 완료(분 243) 전 구간만 본다. 완료 뒤 테이블이 일반 영업으로 돌아오는 것은
+    // B-2A가 의도한 동작이며 T16/T26이 따로 검증한다.
+    const later = run(state, 200, demandConfig);
+    expect(later.tournament).not.toBeNull();
     for (const s of later.sessions) {
       if (startedBefore.has(s.id)) continue;
       expect(['T1', 'T2']).not.toContain(s.tableId);
@@ -541,18 +570,23 @@ describe('T12 예약 소유권이 저장·복원을 견딘다', () => {
     expect(serialize(broken)).toBe(serialize(straight));
   });
 
-  it('saveVersion은 2이고 v1 저장본은 정의된 마이그레이션으로 읽힌다', () => {
-    expect(SAVE_VERSION).toBe(2);
+  it('saveVersion은 3이고 v1 저장본은 v1->v2->v3 체인으로 읽힌다', () => {
+    expect(SAVE_VERSION).toBe(3);
     const state = run(createInitialState(DEFAULT_CONFIG), 50, DEFAULT_CONFIG);
     const v1 = JSON.parse(serialize(state)) as Record<string, unknown>;
     v1['saveVersion'] = 1;
-    delete (v1['records'] as Record<string, unknown>)['nextTournamentSeq'];
+    const rec = v1['records'] as Record<string, unknown>;
+    delete rec['nextTournamentSeq'];
+    delete rec['totalTournamentRevenueUnits'];
+    delete rec['completedTournaments'];
     delete v1['tournament'];
 
     const migrated = deserialize(JSON.stringify(v1), DEFAULT_CONFIG);
-    expect(migrated.saveVersion).toBe(2);
+    expect(migrated.saveVersion).toBe(3);
     expect(migrated.tournament).toBeNull();
     expect(migrated.records.nextTournamentSeq).toBe(1);
+    expect(migrated.records.totalTournamentRevenueUnits).toBe(0);
+    expect(migrated.records.completedTournaments).toEqual([]);
     expect(migrated.venue.cash).toBe(state.venue.cash); // 돈이 생기지 않았다
   });
 
@@ -642,7 +676,9 @@ describe('T13 준비 -> 완료 전환에서도 소유권이 유지된다', () =>
     const config = demandConfig;
     const state = reservableState(config);
     applyCommand(state, RESERVE, config, []);
-    const ready = run(state, 300, config);
+    // 예약 직후에는 세션이 없으므로 다음 분에 READY가 된다.
+    // 시작은 그 다음 분이므로 이 시점은 여전히 "시작 전"이다.
+    const ready = run(state, 1, config);
 
     expect(ready.tournament!.phase).toBe('RESERVED_READY');
     expect(ready.records.tournamentsDone).toBe(0);
@@ -660,7 +696,9 @@ describe('T13 준비 -> 완료 전환에서도 소유권이 유지된다', () =>
     state.staff.push({ id: 'SPARE', type: 'normal', duty: 'standby', assignedTableId: null });
     applyCommand(state, { type: 'assignDealer', tableId: 'T3', staffId: 'SPARE' }, config, []);
 
-    const after = run(state, 400, config);
+    // 대회 완료(분 243) 전 구간에서 확인한다.
+    const after = run(state, 100, config);
+    expect(after.tournament).not.toBeNull();
     // T3은 전환 완료
     expect(after.tables.find((t) => t.id === 'T3')?.dealerId).toBe('SPARE');
     // 예약 테이블은 딜러가 풀리지 않았다
@@ -677,7 +715,9 @@ describe('T14 선택되지 않은 테이블은 계속 영업한다', () => {
     applyCommand(state, RESERVE, config, []);
     const revenueBefore = state.records.totalRevenueUnits;
 
-    const after = run(state, 600, config);
+    // 대회 완료 전 구간. 완료 뒤 복귀는 T16/T26이 검증한다.
+    const after = run(state, 200, config);
+    expect(after.tournament).not.toBeNull();
     expect(after.records.totalRevenueUnits).toBeGreaterThan(revenueBefore);
 
     const activeTables = new Set(after.sessions.map((s) => s.tableId));
@@ -716,7 +756,7 @@ describe('T15 예약 상태의 예상치는 지어내지 않는다', () => {
     const config = demandConfig;
     const state = reservableState(config, { tables: 5, dealers: 5 });
     applyCommand(state, RESERVE, config, []);
-    const ready = run(state, 300, config);
+    const ready = run(state, 1, config);
     expect(ready.tournament!.phase).toBe('RESERVED_READY');
 
     const result = forecast(ready, { type: 'hireDealer' }, config);
@@ -964,10 +1004,15 @@ describe('운영 예비금 — 채택된 규칙 (05 R10, 잠정)', () => {
     expect(serialize(drainingRestored)).toBe(serialize(state));
 
     // 준비 완료(READY)까지 진행한 뒤 저장·복원
-    const ready = run(state, 400, config);
+    const ready = runUntilPhase(state, 'RESERVED_READY', config);
     expect(ready.tournament!.phase).toBe('RESERVED_READY');
     const readyRestored = deserialize(serialize(ready), config);
     expect(serialize(readyRestored)).toBe(serialize(ready));
+
+    // 진행 중(IN_PROGRESS)에서도 같다
+    const running = runUntilPhase(ready, 'IN_PROGRESS', config);
+    const runningRestored = deserialize(serialize(running), config);
+    expect(serialize(runningRestored)).toBe(serialize(running));
 
     // 복원 지점을 바꿔도 이어서 진행한 결과가 같다
     const straight = run(cloneState(state), 600, config);
