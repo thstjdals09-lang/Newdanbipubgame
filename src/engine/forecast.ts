@@ -183,6 +183,25 @@ export function forecast(
     };
   }
 
+  // 명령 자체가 대회를 예약하는 경우도 위와 같은 이유로 예측할 수 없다.
+  //
+  // 위의 검사는 "이미 예약이 걸린 상태"만 막는다. 그러나 유효한 예약 명령을
+  // 복제본에 적용하면 투자 분기가 곧 예약 상태가 되고, 그 뒤 1,440분을 돌리면
+  // 대회가 영영 시작되지 않는 전망이 만들어진다. 예약 테이블이 24시간 내내
+  // 비어 있는 것으로 계산되므로 추가 매출·순이익·회수 시간이 모두 사실과 다르다.
+  //
+  // 이 검사는 validateCommand 뒤에 온다. 자격을 갖추지 못한 예약 명령은
+  // 미지원이 아니라 거절이므로 사유(COMMAND_REJECTED)를 그대로 돌려줘야 한다.
+  if (command.type === 'reserveSmallTournament') {
+    return {
+      supported: false,
+      code: 'TOURNAMENT_NOT_IMPLEMENTED',
+      detail:
+        '대회 예약 명령의 투자 예상치는 대회 시작·진행·정산까지 계산해야 의미가 있다. ' +
+        '그 범위는 작업 B-2이므로 이 명령의 24시간 예측은 신뢰할 수 없다.',
+    };
+  }
+
   try {
     assertSupported(original, config);
     const baselineStart = cloneState(original);

@@ -9,6 +9,7 @@
 
 import { describe, expect, it } from 'vitest';
 import { DEFAULT_CONFIG, gold, milli } from '../src/config/economy.js';
+import { applyCommand, validateCommand } from '../src/engine/commands.js';
 import { DEFAULT_HORIZON_MINUTES, forecast } from '../src/engine/forecast.js';
 import { createInitialState, serialize } from '../src/engine/state.js';
 import { tick } from '../src/engine/tick.js';
@@ -338,3 +339,104 @@ describe('투자 예상치 경계 시점과 첫 1분 안전성 회귀 검증', (
     expect(() => forecast(state, { type: 'hireDealer' }, config, 1.5)).toThrow(RangeError);
   });
 });
+
+describe('대회 예약 명령의 예상치는 지어내지 않는다 (B-1 회귀)', () => {
+  const config = fixedDemandConfig(20);
+
+  /** 소규모 대회를 예약할 수 있는 최소 조건을 갖춘 상태 */
+  function reservable(cashGold = 50_000) {
+    const state = labState({ tables: 4, dealers: 4, cashGold }, config);
+    state.venue.awarenessMilli = milli(10); // 해금 문턱
+    return run(state, 1, config); // 해금 기록을 엔진이 부여하게 한다
+  }
+
+  const RESERVE = { type: 'reserveSmallTournament', tableIds: ['T1', 'T2'] } as const;
+
+  it('1. 유효한 예약 명령은 supported: true를 돌려주지 않는다', () => {
+    const state = reservable();
+    // 명령 자체는 유효하다 — 거절이 아니라 미지원이어야 한다는 점이 핵심이다
+    expect(validateCommand(state, RESERVE, config).ok).toBe(true);
+
+    const result = forecast(state, RESERVE, config);
+    expect(result.supported).toBe(false);
+    if (result.supported) throw new Error('unreachable');
+    expect(result.code).toBe('TOURNAMENT_NOT_IMPLEMENTED');
+    expect(result.detail).toMatch(/B-2/);
+  });
+
+  it('2. 유효하지 않은 예약 명령은 여전히 COMMAND_REJECTED다', () => {
+    // 해금 전
+    const locked = labState({ tables: 4, dealers: 4, cashGold: 50_000 }, config);
+    const lockedResult = forecast(locked, RESERVE, config);
+    expect(lockedResult.supported).toBe(false);
+    if (lockedResult.supported) throw new Error('unreachable');
+    expect(lockedResult.code).toBe('COMMAND_REJECTED');
+    expect(lockedResult.reason).toBe('TOURNAMENT_LOCKED');
+
+    // 테이블 ID 중복
+    const dup = forecast(
+      reservable(),
+      { type: 'reserveSmallTournament', tableIds: ['T1', 'T1'] },
+      config,
+    );
+    expect(dup.supported).toBe(false);
+    if (dup.supported) throw new Error('unreachable');
+    expect(dup.code).toBe('COMMAND_REJECTED');
+    expect(dup.reason).toBe('TOURNAMENT_TABLE_DUPLICATE');
+
+    // 준비비 부족
+    const poor = forecast(reservable(100), RESERVE, config);
+    expect(poor.supported).toBe(false);
+    if (poor.supported) throw new Error('unreachable');
+    expect(poor.code).toBe('COMMAND_REJECTED');
+    expect(poor.reason).toBe('INSUFFICIENT_CASH');
+  });
+
+  it('3. 두 경우 모두 원본 직렬화 상태를 그대로 둔다', () => {
+    const valid = reservable();
+    const validBefore = serialize(valid);
+    forecast(valid, RESERVE, config);
+    expect(serialize(valid)).toBe(validBefore);
+
+    const invalid = reservable(100);
+    const invalidBefore = serialize(invalid);
+    forecast(invalid, RESERVE, config);
+    expect(serialize(invalid)).toBe(invalidBefore);
+  });
+
+  it('예약이 적용된 뒤의 24시간을 계산해 버리지 않는다', () => {
+    // 같은 상태에서 실제로 예약을 적용하면 예약 테이블이 신규 손님을 받지 않는다.
+    // 그 상태로 24시간을 돌린 "성공한 예측"을 내놓으면 안 된다는 것이 이 결함의 핵심이다.
+    const state = reservable();
+    const applied = cloneStateViaSerialize(state);
+    applyCommand(applied, RESERVE, config, []);
+    expect(applied.tournament).not.toBeNull();
+
+    // 예약 전 상태에 대한 예약 명령 예측
+    expect(forecast(state, RESERVE, config).supported).toBe(false);
+    // 예약 후 상태에 대한 임의 명령 예측
+    expect(forecast(applied, { type: 'hireDealer' }, config).supported).toBe(false);
+  });
+
+  it('4. 대회가 없는 평범한 투자 예상치는 계속 supported: true다', () => {
+    const state = withSpareDealer(labState({ tables: 4, dealers: 3, cashGold: 50_000 }, config));
+    const result = forecast(
+      state,
+      { type: 'assignDealer', tableId: 'T4', staffId: 'SPARE' },
+      config,
+    );
+    expect(result.supported).toBe(true);
+    if (!result.supported) throw new Error('unreachable');
+    expect(result.deltaCompletedGuests).toBeGreaterThan(0);
+
+    // 해금·현금이 충분해 예약도 가능한 상태에서조차, 예약이 아닌 명령은 정상 동작한다
+    const reservableState = reservable();
+    expect(validateCommand(reservableState, RESERVE, config).ok).toBe(true);
+    expect(forecast(reservableState, { type: 'hireDealer' }, config).supported).toBe(true);
+  });
+});
+
+/** 직렬화 왕복으로 깊은 복제를 만든다 (테스트 편의) */
+function cloneStateViaSerialize(state: ReturnType<typeof labState>) {
+  return JSON.parse(serialize(state)) as ReturnType<typeof labState>;
+}
