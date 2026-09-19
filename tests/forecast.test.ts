@@ -270,17 +270,24 @@ describe('미구현 상태는 명시적 미지원으로 돌려준다 (사용자 
     expect(result.code).toBe('REMODEL_NOT_IMPLEMENTED');
   });
 
-  it('예측 기간에 현금이 음수가 되면 긴급 운영 미구현을 알린다', () => {
-    // 수요 0 + 직원 다수 = 비용만 나가는 구성
+  it('예측 기간에 자금이 마르면 긴급 운영 지표와 함께 예측을 돌려준다 (B-3)', () => {
+    // B-3 이전에는 CASH_WENT_NEGATIVE로 예측을 중단했다.
+    // 이제 긴급 축소 운영이 실제 tick 규칙이므로 예측이 그대로 진행되고,
+    // 발생 여부·지원금·진행 시간·종료 시 잔존 여부를 분기별로 보고한다.
     const broke = fixedDemandConfig(0);
-    // 고용 자체는 가능하지만(400G <= 500G) 이후 비용으로 현금이 마른다
     const state = labState({ tables: 5, dealers: 5, cashGold: 500 }, broke);
 
     const result = forecast(state, { type: 'hireDealer' }, broke);
-    expect(result.supported).toBe(false);
-    if (result.supported) throw new Error('unreachable');
-    expect(result.code).toBe('CASH_WENT_NEGATIVE');
-    expect(result.detail).toMatch(/긴급 축소 운영/);
+    expect(result.supported).toBe(true);
+    if (!result.supported) throw new Error('unreachable');
+
+    for (const branch of [result.baseline, result.invested]) {
+      expect(branch.emergencyTriggered).toBe(true);
+      expect(branch.emergencySupportUnits).toBeGreaterThan(0);
+      expect(branch.emergencyMinutes).toBeGreaterThan(0);
+      // 지원금은 영업 순이익에 섞이지 않는다
+      expect(branch.operatingNetUnits).toBe(branch.revenueUnits - branch.recurringCostUnits);
+    }
   });
 
   it('명령 자체가 거절되면 사유를 함께 돌려준다', () => {
@@ -314,7 +321,7 @@ describe('투자 예상치 경계 시점과 첫 1분 안전성 회귀 검증', (
     expect(serialize(state)).toBe(before);
   });
 
-  it('첫 틱에서만 잔액이 음수이고 다음 틱에 매출로 회복되어도 예측을 거부한다', () => {
+  it('첫 틱에서 자금이 부족하면 긴급 운영이 발동한 예측을 돌려준다 (B-3)', () => {
     // 고정 수요 20: 최초 방문이 분 3, 최초 세션 완료가 분 123이다.
     // 분 121 시점에 테이블 구매비만 남겨 분 122에 일시적으로 적자가 나게 한다.
     let state = run(labState({ tables: 1, dealers: 1, cashGold: 50_000 }, config), 121, config);
@@ -322,15 +329,21 @@ describe('투자 예상치 경계 시점과 첫 1분 안전성 회귀 검증', (
     state.venue.cash = gold(1200);
 
     const command = { type: 'buyTable' } as const;
+    // B-3 이전에는 이 틱에서 cashNegative가 나고 예측이 거부됐다.
+    // 이제는 긴급 운영이 부족액만 지원하므로 현금이 음수가 되지 않는다.
     const first = tick(state, config, [command]);
-    expect(first.events.some((event) => event.type === 'cashNegative')).toBe(true);
-    const second = tick(first.state, config);
-    expect(second.state.venue.cash).toBeGreaterThanOrEqual(0);
+    expect(first.events.some((event) => event.type === 'cashNegative')).toBe(false);
+    expect(first.events.some((event) => event.type === 'emergencyStarted')).toBe(true);
+    expect(first.state.venue.cash).toBeGreaterThanOrEqual(0);
 
     const result = forecast(state, command, config, 2);
-    expect(result.supported).toBe(false);
-    if (result.supported) throw new Error('현금 부족 시 예측을 지원하면 안 된다');
-    expect(result.code).toBe('CASH_WENT_NEGATIVE');
+    expect(result.supported).toBe(true);
+    if (!result.supported) throw new Error('unreachable');
+    // 투자 분기에서만 자금이 마른다 — 두 분기를 그대로 비교할 수 있다
+    expect(result.invested.emergencyTriggered).toBe(true);
+    expect(result.invested.emergencySupportUnits).toBeGreaterThan(0);
+    expect(result.baseline.emergencyTriggered).toBe(false);
+    expect(result.baseline.emergencySupportUnits).toBe(0);
   });
 
   it('0분 또는 소수 분 지평으로 예상치를 생성하지 않는다', () => {

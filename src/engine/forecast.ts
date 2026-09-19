@@ -50,10 +50,21 @@ export interface ForecastBranch {
   readonly revenueUnits: Money;
   /** 같은 기간의 반복 비용 (급여 + 시설비 + 매장비) */
   readonly recurringCostUnits: Money;
-  /** revenueUnits - recurringCostUnits. 일회성 투자 비용을 포함하지 않는다. */
+  /**
+   * revenueUnits - recurringCostUnits. 일회성 투자 비용을 포함하지 않는다.
+   * **긴급 지원금도 포함하지 않는다.** 지원금은 영업 성과가 아니다.
+   */
   readonly operatingNetUnits: Money;
   readonly completedGuests: number;
   readonly endCashUnits: Money;
+  /** 이 분기에서 긴급 축소 운영이 발생했는가 (B-3) */
+  readonly emergencyTriggered: boolean;
+  /** 지원금 합계. 현금에는 반영되지만 매출·순이익에는 넣지 않는다. */
+  readonly emergencySupportUnits: Money;
+  /** 긴급 운영 상태로 진행한 게임 분 */
+  readonly emergencyMinutes: number;
+  /** 예측 종료 시점에도 긴급 운영이 남아 있는가 */
+  readonly emergencyActiveAtEnd: boolean;
 }
 
 export type ForecastDelayReason =
@@ -118,14 +129,18 @@ function run(
   const baseRevenue = r0.totalRevenueUnits;
   const baseRecurring = r0.totalWageUnits + r0.totalFacilityUnits + r0.totalVenueCostUnits;
   const baseGuests = r0.completedGuests;
+  const baseSupport = r0.totalEmergencySupportUnits;
+  const baseEmergencyMinutes = r0.emergencyMinutes;
 
   let current = start;
   let cashWentNegative = false;
+  let emergencyTriggered = start.emergency !== null;
 
   for (let i = 0; i < minutes; i += 1) {
     const result = tick(current, config);
     current = result.state;
     if (result.events.some((e) => e.type === 'cashNegative')) cashWentNegative = true;
+    if (result.events.some((e) => e.type === 'emergencyStarted')) emergencyTriggered = true;
   }
 
   const r = current.records;
@@ -137,9 +152,14 @@ function run(
     branch: {
       revenueUnits,
       recurringCostUnits,
+      // 지원금은 여기 넣지 않는다. 현금 증가와 투자 수익을 혼동하지 않기 위해서다.
       operatingNetUnits: revenueUnits - recurringCostUnits,
       completedGuests: r.completedGuests - baseGuests,
       endCashUnits: current.venue.cash,
+      emergencyTriggered,
+      emergencySupportUnits: r.totalEmergencySupportUnits - baseSupport,
+      emergencyMinutes: r.emergencyMinutes - baseEmergencyMinutes,
+      emergencyActiveAtEnd: current.emergency !== null,
     },
     cashWentNegative,
   };
@@ -237,15 +257,10 @@ export function forecast(
     const investedRun = run(investedStart, horizonMinutes, config);
     const invested = investedRun.branch;
 
-    if (baselineRun.cashWentNegative || investedRun.cashWentNegative) {
-      return {
-        supported: false,
-        code: 'CASH_WENT_NEGATIVE',
-        detail:
-          '예측 기간 중 현금이 음수가 된다. 완성된 게임이라면 긴급 축소 운영(Economy §11)이 ' +
-          '발동하는 구간이며, 그 규칙은 작업 B에서 구현한다. 이 구간의 24시간 예측은 신뢰할 수 없다.',
-      };
-    }
+    // 정상적인 자금 부족은 더 이상 예측을 중단시키지 않는다 (B-3).
+    // 긴급 축소 운영이 실제 tick 규칙으로 처리되며, 각 분기의 발생 여부·지원금·
+    // 진행 시간·종료 시 잔존 여부를 ForecastBranch에서 확인할 수 있다.
+    // 미구현 기능과 잘못된 상태는 아래 catch의 UnsupportedStateError가 계속 걸러낸다.
 
     const deltaOperatingNetUnits = invested.operatingNetUnits - baselineRun.branch.operatingNetUnits;
 
@@ -327,6 +342,11 @@ export interface TournamentBranchTotals {
   readonly oneOffExpenseUnits: Money;
   /** 일반 완료 이용객. 대회 참가자는 포함하지 않는다. */
   readonly completedGuests: number;
+  /** 긴급 운영 지원금. 현금에는 반영되지만 매출·순이익이 아니다 (B-3). */
+  readonly emergencySupportUnits: Money;
+  readonly emergencyTriggered: boolean;
+  readonly emergencyMinutes: number;
+  readonly emergencyActiveAtEnd: boolean;
   readonly endCashUnits: Money;
   readonly endLockedCashUnits: Money;
   readonly endAvailableCashUnits: Money;
@@ -376,6 +396,8 @@ export interface TournamentForecastOk {
     readonly recurringCostUnits: Money;
     readonly oneOffExpenseUnits: Money;
     readonly completedGuests: number;
+    /** 지원금 차이. 현금 차이에는 들어가지만 영업 성과가 아니다 (B-3). */
+    readonly emergencySupportUnits: Money;
     readonly endCashUnits: Money;
     readonly endAvailableCashUnits: Money;
   };
@@ -409,14 +431,18 @@ function runTournamentBranch(
   const baseRecurring = r0.totalWageUnits + r0.totalFacilityUnits + r0.totalVenueCostUnits;
   const baseOneOff = r0.totalOneOffUnits;
   const baseGuests = r0.completedGuests;
+  const baseSupport = r0.totalEmergencySupportUnits;
+  const baseEmergencyMinutes = r0.emergencyMinutes;
 
   let current = start;
   let cashWentNegative = false;
+  let emergencyTriggered = start.emergency !== null;
 
   for (let i = 0; i < minutes; i += 1) {
     const result = tick(current, config);
     current = result.state;
     if (result.events.some((e) => e.type === 'cashNegative')) cashWentNegative = true;
+    if (result.events.some((e) => e.type === 'emergencyStarted')) emergencyTriggered = true;
   }
 
   const r = current.records;
@@ -428,6 +454,10 @@ function runTournamentBranch(
         r.totalWageUnits + r.totalFacilityUnits + r.totalVenueCostUnits - baseRecurring,
       oneOffExpenseUnits: r.totalOneOffUnits - baseOneOff,
       completedGuests: r.completedGuests - baseGuests,
+      emergencySupportUnits: r.totalEmergencySupportUnits - baseSupport,
+      emergencyTriggered,
+      emergencyMinutes: r.emergencyMinutes - baseEmergencyMinutes,
+      emergencyActiveAtEnd: current.emergency !== null,
       endCashUnits: current.venue.cash,
       endLockedCashUnits: current.venue.lockedCash,
       endAvailableCashUnits: availableCash(current),
@@ -511,15 +541,10 @@ export function forecastSmallTournament(
     const baselineRun = runTournamentBranch(baselineStart, horizonMinutes, config);
     const tournamentRun = runTournamentBranch(tournamentStart, horizonMinutes, config);
 
-    if (baselineRun.cashWentNegative || tournamentRun.cashWentNegative) {
-      return {
-        supported: false,
-        code: 'CASH_WENT_NEGATIVE',
-        detail:
-          '예측 기간 중 현금이 음수가 된다. 완성된 게임이라면 긴급 축소 운영(Economy §11)이 ' +
-          '발동하는 구간이며 그 규칙은 작업 B-3이다. 이 구간의 비교 예측은 신뢰할 수 없다.',
-      };
-    }
+    // 정상적인 자금 부족은 더 이상 예측을 중단시키지 않는다 (B-3).
+    // 긴급 축소 운영이 실제 tick 규칙으로 처리되고, 분기별 발생 여부·지원금·
+    // 진행 시간·종료 시 잔존 여부를 TournamentBranchTotals에서 확인할 수 있다.
+    // 한쪽 분기에서만 긴급 운영이 일어나는 경우도 그대로 비교된다.
 
     // 지평 안에서 끝나지 않았다면 정산을 지어내지 않는다. 지평도 조용히 늘리지 않는다.
     const endTournament = tournamentRun.endState.tournament;
@@ -551,15 +576,19 @@ export function forecastSmallTournament(
       recurringCostUnits: tournament.recurringCostUnits - baseline.recurringCostUnits,
       oneOffExpenseUnits: tournament.oneOffExpenseUnits - baseline.oneOffExpenseUnits,
       completedGuests: tournament.completedGuests - baseline.completedGuests,
+      emergencySupportUnits: tournament.emergencySupportUnits - baseline.emergencySupportUnits,
       endCashUnits: tournament.endCashUnits - baseline.endCashUnits,
       endAvailableCashUnits: tournament.endAvailableCashUnits - baseline.endAvailableCashUnits,
     };
 
     // 현금 차이는 기록된 수입·지출 차이와 반드시 맞아야 한다.
+    // 긴급 지원금은 현금에는 들어가므로 정합식에 포함하되,
+    // 매출·순이익 계정에는 넣지 않는다 (B-3).
     // 어긋나면 어딘가에서 금액을 두 번 셌거나 빠뜨린 것이므로 결과를 내지 않는다.
     const reconciled =
       delta.ordinaryRevenueUnits +
-      delta.tournamentRevenueUnits -
+      delta.tournamentRevenueUnits +
+      delta.emergencySupportUnits -
       delta.recurringCostUnits -
       delta.oneOffExpenseUnits;
     if (reconciled !== delta.endCashUnits) {

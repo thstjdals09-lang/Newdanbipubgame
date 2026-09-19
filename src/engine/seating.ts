@@ -13,7 +13,7 @@
  */
 
 import type { EconomyConfig } from '../config/economy.js';
-import { acceptsNewGuests, sessionMinutesFor } from './derive.js';
+import { canSeatNewGuests, sessionMinutesFor } from './derive.js';
 import { gold } from '../config/economy.js';
 import type { EngineEvent, GameState, QueueEntry, SessionState, TableId } from './types.js';
 
@@ -31,7 +31,7 @@ export function freeSeats(state: GameState, config: EconomyConfig): FreeSeat[] {
   }
 
   const tables = state.tables
-    .filter(acceptsNewGuests)
+    .filter((t) => canSeatNewGuests(state, t))
     .slice()
     .sort((a, b) => a.spotIndex - b.spotIndex);
 

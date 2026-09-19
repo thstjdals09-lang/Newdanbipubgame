@@ -8,8 +8,8 @@
  *   5. 갱신 전 만족도 및 현재 인지도로 수요를 계산하고 신규 방문 수를 누적한다.
  *   6. 대기 만료 -> 기존 대기 -> 신규 방문 순으로 착석. 잔여는 대기 또는 이탈.
  *   7. 서비스 품질·최근 이탈률·만족도를 갱신하고 세션 인지도 보상을 반영한다.
- *   8. 급여·시설비·운영비를 해당 1분만큼 차감한다.
- *   9. 해금·특별 직원 지급·배치 전환을 판정하고 상태를 저장 대상으로 만든다.
+ *   8. 급여·시설비·운영비를 해당 1분만큼 차감한다. 부족하면 긴급 지원 후 차감한다.
+ *   9. 해금·특별 직원 지급·(긴급 축소 또는 배치 전환)을 판정하고 저장 대상으로 만든다.
  *
  * 순서를 바꾸면 같은 조건의 재현 결과가 바뀌므로 rulesVersion을 올려야 한다.
  */
@@ -17,15 +17,20 @@
 import { DEFAULT_CONFIG } from '../config/economy.js';
 import type { EconomyConfig, StaffType } from '../config/economy.js';
 import { processCommands } from './commands.js';
-import { minuteCosts } from './costs.js';
+import { applyMinuteCostsWithSupport, processEmergency } from './emergency.js';
 import { stepArrivals } from './demand.js';
 import { installedTableCount } from './derive.js';
 import { assertSafeInteger } from './fixed.js';
 import { processSeating } from './seating.js';
 import { recordWindow, stepSatisfaction } from './satisfaction.js';
-import { assertInvariants, assertSupported, cloneState } from './state.js';
+import {
+  assertCashIntegrity,
+  assertInvariants,
+  assertRequiredStateFields,
+  assertSupported,
+  cloneState,
+} from './state.js';
 import { processTournament } from './tournament.js';
-import { UnsupportedStateError } from './types.js';
 import type { Command, EngineEvent, GameState, TickResult } from './types.js';
 
 /** 틱 9단계: 해금 판정. 같은 해금은 기록 ID로 한 번만 부여한다 (Progression §4). */
@@ -160,7 +165,11 @@ export function tick(
   config: EconomyConfig = DEFAULT_CONFIG,
   commands: readonly Command[] = [],
 ): TickResult {
+  // 손상된 입력을 지원금·매출·복제가 가리기 전에 먼저 거절한다.
+  // 복제 전에 검사하므로 거절 시 호출자의 상태는 그대로다.
+  assertRequiredStateFields(input);
   assertSupported(input, config);
+  assertCashIntegrity(input);
   const state = cloneState(input);
   const events: EngineEvent[] = [];
 
@@ -219,33 +228,28 @@ export function tick(
     );
   }
 
-  // 8) 반복 비용
-  const costs = minuteCosts(state, config);
-  state.venue.cash = assertSafeInteger(state.venue.cash - costs.total, 'cash');
-  state.records.totalWageUnits += costs.wage;
-  state.records.totalFacilityUnits += costs.facility;
-  state.records.totalVenueCostUnits += costs.venue;
-
-  if (state.venue.cash - state.venue.lockedCash < 0 && state.venue.lockedCash > 0) {
-    // 반복 비용이 잠긴 자금을 잠식하기 시작했다.
-    // 완성된 게임이라면 긴급 축소 운영(Economy §11)이 발동하는 구간이지만
-    // 그 규칙은 작업 B-3이다. 잠긴 돈을 쓰거나 음수를 잘라내지 않고 명시적으로 멈춘다.
-    throw new UnsupportedStateError(
-      'EMERGENCY_NOT_IMPLEMENTED',
-      `잠긴 자금을 잠식하는 상태다 (cash=${state.venue.cash}, locked=${state.venue.lockedCash}). ` +
-        '긴급 축소 운영은 작업 B-3에서 구현한다.',
-    );
-  }
+  // 8) 반복 비용. 자기 자금으로 못 내면 부족액만 지원하고 긴급 운영에 진입한다 (B-3).
+  //    비용 확정 -> 부족액 지원 -> 1회 차감 순서를 emergency.ts가 보장한다.
+  //    발동한 분의 비용을 줄이려고 배치를 소급 변경하지 않는다.
+  applyMinuteCostsWithSupport(state, config, events);
 
   if (state.venue.cash < 0) {
-    // 잠긴 자금이 없는 경우의 기존 동작. 조용히 0으로 자르지 않고 사실대로 알린다.
+    // 지원이 정상 동작하면 도달하지 않는다. 방어적으로 사실대로 알린다.
     events.push({ type: 'cashNegative', cash: state.venue.cash });
   }
 
   // 9) 해금·보상·배치 전환
   processUnlocks(state, config, events);
   processStaffRewards(state, config, events);
-  applyPendingDealerChanges(state, events);
+
+  if (state.emergency !== null) {
+    // 긴급 운영 중에는 축소 계획이 일반 pendingDealerId 전환을 대신한다.
+    // 두 소유자가 같은 테이블을 동시에 건드리지 않게 한 쪽만 실행한다.
+    state.records.emergencyMinutes += 1;
+    processEmergency(state, config, events);
+  } else {
+    applyPendingDealerChanges(state, events);
+  }
 
   assertInvariants(state);
   return { state, events };

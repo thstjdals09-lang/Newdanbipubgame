@@ -64,6 +64,9 @@ export function createInitialState(config: EconomyConfig = DEFAULT_CONFIG): Game
       nextLedgerSeq: 1,
       nextTournamentSeq: 1,
       totalTournamentRevenueUnits: 0,
+      totalEmergencySupportUnits: 0,
+      emergencyMinutes: 0,
+      nextEmergencySeq: 1,
       completedTournaments: [],
     },
 
@@ -87,6 +90,8 @@ export function createInitialState(config: EconomyConfig = DEFAULT_CONFIG): Game
  * 어떤 필드가 복제되는지 코드에 드러나게 하기 위해서다.
  */
 export function cloneState(state: GameState): GameState {
+  // 누락된 필드를 null로 바꿔 손상을 숨기지 않는다. 복제 전에 거절한다.
+  assertRequiredStateFields(state);
   return {
     rulesVersion: state.rulesVersion,
     saveVersion: state.saveVersion,
@@ -107,7 +112,9 @@ export function cloneState(state: GameState): GameState {
             dealerIds: [...state.tournament.dealerIds],
           },
     remodel: state.remodel,
-    emergency: state.emergency,
+    // 긴급 운영 상태도 깊게 복제한다. 얕게 두면 예상치의 두 분기가 같은
+    // 레코드를 공유해 단계·지원금 누계가 원본으로 새어 나간다.
+    emergency: state.emergency === null ? null : { ...state.emergency },
     unlocks: state.unlocks.map((u) => ({ ...u })),
     records: {
       ...state.records,
@@ -162,11 +169,15 @@ export function assertSupported(state: GameState, config: EconomyConfig): void {
       '리모델링 전환은 작업 C에서 구현한다. 이 상태로는 계산할 수 없다.',
     );
   }
-  if (state.emergency !== null) {
-    throw new UnsupportedStateError(
-      'EMERGENCY_NOT_IMPLEMENTED',
-      '긴급 축소 운영은 작업 B에서 구현한다. 이 상태로는 계산할 수 없다.',
-    );
+  const emergency = state.emergency;
+  if (emergency !== null) {
+    const supportedPhase = emergency.phase === 'DOWNSIZING' || emergency.phase === 'RECOVERING';
+    if (!supportedPhase) {
+      throw new UnsupportedStateError(
+        'EMERGENCY_NOT_IMPLEMENTED',
+        `지원하지 않는 긴급 운영 단계: ${String(emergency.phase)}`,
+      );
+    }
   }
   if (state.rulesVersion !== config.rulesVersion) {
     throw new UnsupportedStateError(
@@ -176,22 +187,79 @@ export function assertSupported(state: GameState, config: EconomyConfig): void {
   }
 }
 
-/** 매 틱 검사하는 불변식 (05 §3, §4-1) */
-export function assertInvariants(state: GameState): void {
+/**
+ * 모든 저장 버전에서 존재해야 하는 최상위 필드.
+ *
+ * tournament / remodel / emergency는 작업 A(saveVersion 1)부터 항상 직렬화됐다.
+ * 값이 null인 것(= 그런 상태가 없다)과 필드 자체가 없는 것(= 손상)은 다르다.
+ * 어떤 마이그레이션도 이 필드를 초기화하지 않는다. 없으면 거절한다.
+ */
+const REQUIRED_STATE_FIELDS = ['tournament', 'remodel', 'emergency'] as const;
+
+/**
+ * 필수 필드 존재 검사.
+ *
+ * **누락을 null로 자동 복구하지 않는다.** 복구하면 손상된 저장본이 정상 상태로
+ * 세탁되고, 대회 예약이 사라진 채 준비비 잠금과 tournamentHeld 테이블만 남는다.
+ *
+ * 누락된 필드를 그대로 두면 이후 코드가 undefined.phase를 읽어 TypeError가 난다.
+ * 그 전에 명확한 무결성 오류로 거절하는 것이 이 함수의 목적이다.
+ */
+export function assertRequiredStateFields(state: GameState): void {
+  const raw = state as unknown as Record<string, unknown>;
+  for (const key of REQUIRED_STATE_FIELDS) {
+    if (!(key in raw)) {
+      throw new Error(
+        `저장 무결성: 필수 필드 ${key}가 없다. 값이 null인 것과 필드 누락은 다르며, ` +
+          '누락은 null로 복구하지 않는다.',
+      );
+    }
+    if (raw[key] === undefined) {
+      throw new Error(`저장 무결성: 필수 필드 ${key}가 undefined다. 손상된 저장본이다.`);
+    }
+  }
+}
+
+/**
+ * 현금 계정의 무결성 (05 §3).
+ *
+ * **정상적인 "이번 분 비용 부족"과 이미 손상된 입력 상태를 구분하는 관문이다.**
+ *
+ * 긴급 축소 운영은 사용 가능 현금이 이번 분 비용보다 모자랄 때 부족액을 지원한다.
+ * 그러나 입력 자체가 아래 중 하나라면 그것은 자금 부족이 아니라 손상된 데이터다.
+ * 지원금으로 덮으면 잘못된 잔액이 정상값으로 세탁된다.
+ *
+ *   cash < 0            보유 현금이 음수일 수 없다
+ *   lockedCash < 0      잠금 금액이 음수일 수 없다
+ *   lockedCash > cash   잠긴 금액이 보유 현금을 넘을 수 없다
+ *
+ * 정상 운영에서는 이 조합이 만들어지지 않는다. 8단계가 부족액을 지원한 뒤
+ * 비용을 차감하면 남는 현금이 잠긴 금액 이상이기 때문이다.
+ *
+ * 잔액 0, 비용과 같은 잔액, 비용보다 1unit 부족한 잔액은 모두 cash >= 0이므로
+ * 여기를 통과하고 정상적으로 지원받는다.
+ */
+export function assertCashIntegrity(state: GameState): void {
   const { cash, lockedCash } = state.venue;
   assertSafeInteger(cash, 'venue.cash');
   assertSafeInteger(lockedCash, 'venue.lockedCash');
+
+  if (cash < 0) {
+    throw new Error(
+      `보유 현금이 음수다: cash=${cash}. 손상된 상태이므로 긴급 지원으로 덮지 않는다.`,
+    );
+  }
   if (lockedCash < 0) {
     throw new Error(`잠금 금액이 음수: ${lockedCash}`);
   }
-  if (cash >= 0 && lockedCash > cash) {
+  if (lockedCash > cash) {
     throw new Error(`잠금 금액이 보유 현금을 초과: locked=${lockedCash} cash=${cash}`);
   }
-  if (cash < 0 && lockedCash > 0) {
-    // 현금이 음수인데 잠긴 자금이 남아 있는 상태는 긴급 축소 운영(작업 B)의 영역이다.
-    // 이번 구현에서 이 조합이 만들어지면 버그다.
-    throw new Error(`현금이 음수인데 잠긴 자금이 있음: locked=${lockedCash} cash=${cash}`);
-  }
+}
+
+/** 매 틱 검사하는 불변식 (05 §3, §4-1) */
+export function assertInvariants(state: GameState): void {
+  assertCashIntegrity(state);
   assertSafeInteger(state.time.arrivalCarry, 'time.arrivalCarry');
   assertSafeInteger(state.venue.satisfactionRemainder, 'venue.satisfactionRemainder');
 }
@@ -226,13 +294,14 @@ export function serialize(state: GameState): string {
  */
 function migrateV1ToV2(raw: GameState): GameState {
   const migrated = raw as GameState & { records: { nextTournamentSeq?: number } };
-  if (migrated.tournament != null) {
+  // v1에도 tournament 필드는 있었다(항상 null). 값만 확인하고 초기화하지 않는다.
+  if (migrated.tournament !== null) {
     throw new UnsupportedStateError(
       'SAVE_VERSION_MISMATCH',
       'v1 저장본에 대회 예약이 들어 있다. v1은 예약을 표현할 수 없으므로 마이그레이션 의미가 정의되지 않는다.',
     );
   }
-  migrated.tournament = null;
+  // v1에 실제로 없던 필드만 초기화한다.
   if (migrated.records.nextTournamentSeq === undefined) {
     migrated.records.nextTournamentSeq = 1;
   }
@@ -271,11 +340,83 @@ function migrateV2ToV3(raw: GameState): GameState {
   return migrated;
 }
 
+/**
+ * saveVersion 1~3이 함께 쓰던 유일한 계산 규칙 버전.
+ *
+ * 작업 A부터 B-2C까지 규칙 버전은 이 값 하나였고, B-3에서 8·9단계 규칙이 바뀌며
+ * saveVersion 4와 함께 올라갔다. 따라서 (saveVersion <= 3, rulesVersion) 조합 중
+ * 실제로 존재한 적 있는 것은 이 하나뿐이다.
+ */
+const LEGACY_RULES_VERSION_V1_TO_V3 = 'economy-0.1+adopt-v1';
+
+/**
+ * v3 -> v4 (B-3): 긴급 축소 운영 상태와 지원금 계정이 추가됐다.
+ *   emergency                            null (v3은 긴급 운영을 표현할 수 없었다)
+ *   records.totalEmergencySupportUnits    0   (v3은 지원금을 지급한 적이 없다)
+ *   records.emergencyMinutes              0
+ *   records.nextEmergencySeq              1   (아직 어떤 긴급 운영 ID도 발급된 적 없다)
+ *
+ * 계산 규칙도 함께 바뀌었으므로 rulesVersion을 올린다.
+ * v3 상태는 새 규칙에서도 그대로 유효하다. 달라지는 것은 "자기 자금으로 비용을
+ * 낼 수 없는 순간"의 처리뿐이며, v3에서 그 순간은 예외로 중단되던 지점이다.
+ * 따라서 정상적으로 저장된 v3 본은 과거 기록을 바꾸지 않고 옮길 수 있다.
+ *
+ * 완료된 대회 기록, 준비비 잠금, 직원 보상 지급 기록, 나머지 누계는 보존한다.
+ * 손상된 저장 데이터를 지원금으로 정상화하지 않는다.
+ */
+function migrateV3ToV4(raw: GameState): GameState {
+  // 원본 저장 구조 버전과 계산 규칙 버전의 **조합**을 검사한다.
+  // 규칙 버전을 무조건 현재 값으로 덮어써서 알 수 없는 저장본을 받아들이지 않는다.
+  if (raw.rulesVersion !== LEGACY_RULES_VERSION_V1_TO_V3) {
+    throw new UnsupportedStateError(
+      'RULES_VERSION_MISMATCH',
+      `saveVersion 3과 함께 존재한 계산 규칙 버전은 ${LEGACY_RULES_VERSION_V1_TO_V3}뿐이다. ` +
+        `받은 값: ${String(raw.rulesVersion)}. 알 수 없는 조합이므로 변환하지 않는다.`,
+    );
+  }
+
+  const migrated = raw as GameState & {
+    records: {
+      totalEmergencySupportUnits?: number;
+      emergencyMinutes?: number;
+      nextEmergencySeq?: number;
+    };
+  };
+
+  // v3에도 emergency 필드는 있었다(항상 null). 값만 확인하고 초기화하지 않는다.
+  if (migrated.emergency !== null) {
+    throw new UnsupportedStateError(
+      'SAVE_VERSION_MISMATCH',
+      'v3 저장본에 긴급 운영 상태가 들어 있다. v3은 이를 표현할 수 없으므로 마이그레이션 의미가 정의되지 않는다.',
+    );
+  }
+  // v3에 실제로 없던 필드만 초기화한다.
+  if (migrated.records.totalEmergencySupportUnits === undefined) {
+    migrated.records.totalEmergencySupportUnits = 0;
+  }
+  if (migrated.records.emergencyMinutes === undefined) {
+    migrated.records.emergencyMinutes = 0;
+  }
+  if (migrated.records.nextEmergencySeq === undefined) {
+    migrated.records.nextEmergencySeq = 1;
+  }
+  // 위에서 확인한 과거 규칙 버전에서 현재 규칙 버전으로만 올린다.
+  // 경제 수치는 하나도 건드리지 않는다.
+  migrated.rulesVersion = RULES_VERSION;
+  migrated.saveVersion = 4;
+  return migrated;
+}
+
 function migrateSave(raw: GameState): GameState {
+  // 필수 필드는 모든 저장 버전에 있었다. 버전 분기 전에 확인한다.
+  // 여기서 통과시키면 아래 마이그레이션이 누락을 조용히 메우게 된다.
+  assertRequiredStateFields(raw);
+
   let current = raw;
 
   if (current.saveVersion === 1) current = migrateV1ToV2(current);
   if (current.saveVersion === 2) current = migrateV2ToV3(current);
+  if (current.saveVersion === 3) current = migrateV3ToV4(current);
 
   if (current.saveVersion !== SAVE_VERSION) {
     throw new UnsupportedStateError(
@@ -325,7 +466,12 @@ export function assertReservationIntegrity(state: GameState): void {
     throw new Error('완료된 대회 기록에 중복 ID가 있다');
   }
 
+  // undefined는 "대회가 없다"가 아니라 "필드가 손상됐다"는 뜻이다.
+  // 조용히 없음으로 취급하면 준비비 잠금과 tournamentHeld 테이블만 남는다.
   const t = state.tournament;
+  if (t === undefined) {
+    throw new Error('저장 무결성: tournament 필드가 없다. 없음(null)과 누락은 다르다.');
+  }
   if (t === null) return;
 
   // 활성 예약이 이미 완료된 대회와 같은 ID면 중복 정산이 가능해진다.

@@ -353,7 +353,7 @@ describe('이미 대회가 걸린 상태는 비교 기준을 만들 수 없다',
 });
 
 describe('긴급 운영이 필요한 구간은 성공 결과를 내지 않는다', () => {
-  it('예측 중 잠긴 자금이 잠식되면 EMERGENCY_NOT_IMPLEMENTED를 돌려준다', () => {
+  it('예측 중 자금이 마르면 긴급 운영 지표와 함께 예측을 돌려준다 (B-3)', () => {
     // 테이블 3개 중 딜러는 2명. T1·T2를 예약하면 영업 테이블이 0이 되어 매출이 끊긴다.
     const config = demandConfig;
     const state = reservableState(config, { tables: 3, dealers: 2 });
@@ -371,11 +371,20 @@ describe('긴급 운영이 필요한 구간은 성공 결과를 내지 않는다
       60;
     tight.venue.cash = tournamentPrepCostUnits(SMALL, 16) + hourlyUnits * 4;
 
+    // B-3 이전에는 EMERGENCY_NOT_IMPLEMENTED로 중단했다.
+    // 이제는 긴급 축소 운영이 실제 규칙이므로 예측이 끝까지 진행된다.
     const r = forecastSmallTournament(tight, TABLES, config, 1440);
-    expect(r.supported).toBe(false);
-    if (r.supported) throw new Error('unreachable');
-    expect(r.code).toBe('EMERGENCY_NOT_IMPLEMENTED');
-    expect(r.detail).toMatch(/B-3/);
+    expect(r.supported).toBe(true);
+    if (!r.supported) throw new Error('unreachable');
+
+    // 대회 분기에서만 자금이 마른다. 기준 분기는 멀쩡하다.
+    expect(r.tournament.emergencyTriggered).toBe(true);
+    expect(r.tournament.emergencySupportUnits).toBeGreaterThan(0);
+    expect(r.baseline.emergencyTriggered).toBe(false);
+    expect(r.baseline.emergencySupportUnits).toBe(0);
+    expect(r.delta.emergencySupportUnits).toBe(r.tournament.emergencySupportUnits);
+    // 대회는 정상적으로 완료됐다
+    expect(r.completedAtMinute).toBeGreaterThan(0);
   });
 
   it('매출이 끊기는 구성의 수지가 기록값과 정확히 맞는다', () => {

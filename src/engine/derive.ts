@@ -21,7 +21,23 @@ export function findTable(state: GameState, id: string): TableState | undefined 
   return state.tables.find((t) => t.id === id);
 }
 
-/** 이 테이블이 일반 영업으로 신규 손님을 받을 수 있는가 */
+/**
+ * 이 테이블이 일반 영업으로 신규 손님을 받을 수 있는가.
+ *
+ * 긴급 축소 운영 중에는 유지 대상으로 고른 테이블 하나만 받는다 (Economy §11).
+ * 대상이 아직 정해지지 않았으면 어떤 테이블도 받지 않는다.
+ *
+ * 대회가 끝나 테이블이 operating으로 돌아와도 이 제한이 먼저 걸린다.
+ * 비용 계산은 이 제한과 무관하게 정리·대회 자원의 비용을 정상 부과한다.
+ */
+export function canSeatNewGuests(state: GameState, table: TableState): boolean {
+  if (table.status !== 'operating') return false;
+  const emergency = state.emergency;
+  if (emergency === null) return true;
+  return emergency.keptTableId === table.id;
+}
+
+/** 상태와 무관한 테이블 자체의 영업 상태. 비용·집계용. */
 export function acceptsNewGuests(table: TableState): boolean {
   return table.status === 'operating';
 }
@@ -58,9 +74,12 @@ export function operatingTableCount(state: GameState): number {
   return state.tables.filter((t) => t.status === 'operating').length;
 }
 
-/** 운영 좌석 수 = 현재 영업 중인 테이블의 전체 좌석 (GDD §4) */
+/**
+ * 운영 좌석 수 = 신규 손님을 받을 수 있는 테이블의 전체 좌석 (GDD §4).
+ * 긴급 운영 중에는 유지 대상 한 곳만 센다.
+ */
 export function operatingSeats(state: GameState, config: EconomyConfig): number {
-  return operatingTableCount(state) * config.table.seats;
+  return state.tables.filter((t) => canSeatNewGuests(state, t)).length * config.table.seats;
 }
 
 /**
@@ -71,7 +90,9 @@ export function operatingSeats(state: GameState, config: EconomyConfig): number 
 export function theoreticalCapacityMilli(state: GameState, config: EconomyConfig): number {
   let total = 0;
   for (const table of state.tables) {
-    if (table.status !== 'operating') continue;
+    // 긴급 운영 중에는 실제로 손님을 받을 수 있는 테이블만 센다.
+    // 표시된 처리 능력과 착석 가능 좌석이 어긋나지 않게 한다.
+    if (!canSeatNewGuests(state, table)) continue;
     const minutes = sessionMinutesFor(state, table, config);
     total += Math.floor((config.table.seats * 60 * 1000) / minutes);
   }

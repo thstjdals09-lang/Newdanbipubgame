@@ -177,12 +177,57 @@ export interface TournamentCompletionRecord {
   readonly dealerIds: readonly StaffId[];
 }
 
+/* ------------------------------------------------------------------ */
+/* 긴급 축소 운영 (작업 B-3)                                             */
+/* ------------------------------------------------------------------ */
+
+/**
+ * 긴급 운영 단계.
+ *
+ *   DOWNSIZING  축소가 아직 끝나지 않았다. 유지 대상 밖의 일반 테이블에
+ *               미완료 세션이 남아 있거나 유지 대상이 아직 정해지지 않았다.
+ *   RECOVERING  최소 배치까지 축소가 끝났다. 남은 조건은 자금 회복뿐이다.
+ *
+ * 두 단계 모두 명령 제한과 착석 제한이 동일하게 걸린다.
+ * 단계는 "무엇을 더 기다려야 하는가"를 구분하기 위한 것이다.
+ */
+export type EmergencyPhase = 'DOWNSIZING' | 'RECOVERING';
+
+/**
+ * 긴급 축소 운영 상태 (Economy §11).
+ *
+ * 자기 자금으로 이번 분의 반복 비용을 낼 수 없을 때 진입한다.
+ * 부족액만 지원하고, 최소 배치(테이블 1개 + 딜러 1명)로 줄인 뒤
+ * 4게임시간 운영비를 자력으로 확보하면 종료한다.
+ *
+ * 대회 예약 자원은 이 상태가 건드리지 않는다. 기존 대회 처리만 해제·정산한다.
+ */
+export interface EmergencyState {
+  readonly id: string;
+  phase: EmergencyPhase;
+  readonly startedAtMinute: GameMinute;
+  /** 유지하기로 고른 테이블. 아직 고를 수 없으면 null. */
+  keptTableId: TableId | null;
+  /** 그 테이블의 담당 딜러. keptTableId와 짝을 이룬다. */
+  keptDealerId: StaffId | null;
+  /** 이 긴급 운영에서 지급한 지원금 누계 */
+  supportUnits: Money;
+  /** 지원이 실제로 일어난 분의 수 */
+  supportedMinutes: number;
+}
+
 export interface UnlockRecord {
   readonly id: string;
   readonly grantedAtMinute: GameMinute;
 }
 
-export type LedgerKind = 'oneOff' | 'recurring';
+/**
+ * 거래 유형.
+ *   oneOff            일회성 구매·고용·대회 준비비
+ *   recurring         반복 비용 (원장에 분 단위로 쌓지 않는다)
+ *   emergencySupport  긴급 운영 지원금. 매출·순이익과 절대 섞지 않는다 (Economy §11).
+ */
+export type LedgerKind = 'oneOff' | 'recurring' | 'emergencySupport';
 
 export interface LedgerEntry {
   readonly id: string;
@@ -232,8 +277,11 @@ export interface GameState {
   tournament: TournamentReservation | null;
   /** 작업 C. null이 아니면 엔진이 거절한다. */
   remodel: null;
-  /** 작업 B-3. 긴급 축소 운영. 위와 동일. */
-  emergency: null;
+  /**
+   * 긴급 축소 운영. B-3이 만들고 소유한다.
+   * null이면 평시다.
+   */
+  emergency: EmergencyState | null;
 
   unlocks: UnlockRecord[];
 
@@ -264,6 +312,7 @@ export interface GameState {
     nextSessionSeq: number;
     nextLedgerSeq: number;
     nextTournamentSeq: number;
+    nextEmergencySeq: number;
 
     /**
      * 대회 참가비 수입 누계.
@@ -275,6 +324,16 @@ export interface GameState {
      * 두 번째 독립 잔액이 생기지 않는다.
      */
     totalTournamentRevenueUnits: Money;
+
+    /**
+     * 긴급 운영 지원금 누계.
+     *
+     * **매출·순이익·일회성 구매 비용과 분리한다.** 지원금은 현금 잔액에는 반영되지만
+     * 영업 성과가 아니다. 현금 증가와 투자 수익을 혼동하지 않기 위한 별도 계정이다.
+     */
+    totalEmergencySupportUnits: Money;
+    /** 긴급 운영 상태로 진행한 게임 분 누계 */
+    emergencyMinutes: number;
 
     /** 완료된 대회 기록. 중복 정산 방지의 신원이다. */
     completedTournaments: TournamentCompletionRecord[];
@@ -336,7 +395,9 @@ export type RejectReason =
   | 'TOURNAMENT_DAY_USED'
   | 'TOURNAMENT_PARTICIPANTS_TOO_FEW'
   | 'TOURNAMENT_RESERVE_SHORTFALL'
-  | 'REMODEL_IN_PROGRESS';
+  | 'REMODEL_IN_PROGRESS'
+  /** 긴급 축소 운영 중에는 확장·지출·수동 배치를 할 수 없다 (Economy §11) */
+  | 'EMERGENCY_ACTIVE';
 
 export interface CommandResult {
   readonly ok: boolean;
@@ -362,7 +423,11 @@ export type EngineEvent =
   | { readonly type: 'tournamentReady'; readonly tournamentId: string }
   | { readonly type: 'tournamentStarted'; readonly tournamentId: string; readonly startedAtMinute: GameMinute; readonly endsAtMinute: GameMinute }
   | { readonly type: 'tournamentCompleted'; readonly tournamentId: string; readonly prepCostUnits: Money; readonly entryFeeUnits: Money; readonly awarenessGainedMilli: Milli }
-  | { readonly type: 'cashNegative'; readonly cash: Money };
+  | { readonly type: 'cashNegative'; readonly cash: Money }
+  | { readonly type: 'emergencyStarted'; readonly emergencyId: string; readonly atMinute: GameMinute }
+  | { readonly type: 'emergencySupportGranted'; readonly emergencyId: string; readonly atMinute: GameMinute; readonly amountUnits: Money }
+  | { readonly type: 'emergencyKeptSelected'; readonly emergencyId: string; readonly tableId: TableId; readonly dealerId: StaffId }
+  | { readonly type: 'emergencyEnded'; readonly emergencyId: string; readonly atMinute: GameMinute; readonly totalSupportUnits: Money };
 
 export interface TickResult {
   readonly state: GameState;

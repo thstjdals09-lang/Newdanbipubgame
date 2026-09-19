@@ -570,23 +570,36 @@ describe('T12 예약 소유권이 저장·복원을 견딘다', () => {
     expect(serialize(broken)).toBe(serialize(straight));
   });
 
-  it('saveVersion은 3이고 v1 저장본은 v1->v2->v3 체인으로 읽힌다', () => {
-    expect(SAVE_VERSION).toBe(3);
+  it('saveVersion은 4이고 v1 저장본은 v1->v2->v3->v4 체인으로 읽힌다', () => {
+    // B-3에서 saveVersion이 3 -> 4로 올랐다. 체인 마이그레이션이 끝까지 이어져야 한다.
+    expect(SAVE_VERSION).toBe(4);
     const state = run(createInitialState(DEFAULT_CONFIG), 50, DEFAULT_CONFIG);
     const v1 = JSON.parse(serialize(state)) as Record<string, unknown>;
     v1['saveVersion'] = 1;
+    // 실제 v1 저장본은 당시 규칙 버전을 달고 있었다.
+    // B-3의 마이그레이션은 (저장 구조, 규칙) 조합을 검사하므로 그대로 흉내 낸다.
+    v1['rulesVersion'] = 'economy-0.1+adopt-v1';
     const rec = v1['records'] as Record<string, unknown>;
     delete rec['nextTournamentSeq'];
     delete rec['totalTournamentRevenueUnits'];
     delete rec['completedTournaments'];
-    delete v1['tournament'];
+    delete rec['totalEmergencySupportUnits'];
+    delete rec['emergencyMinutes'];
+    delete rec['nextEmergencySeq'];
+    // tournament/remodel/emergency는 v1에도 있었다(항상 null). 지우지 않는다.
+    v1['tournament'] = null;
+    v1['emergency'] = null;
 
     const migrated = deserialize(JSON.stringify(v1), DEFAULT_CONFIG);
-    expect(migrated.saveVersion).toBe(3);
+    expect(migrated.saveVersion).toBe(4);
     expect(migrated.tournament).toBeNull();
+    expect(migrated.emergency).toBeNull();
     expect(migrated.records.nextTournamentSeq).toBe(1);
     expect(migrated.records.totalTournamentRevenueUnits).toBe(0);
     expect(migrated.records.completedTournaments).toEqual([]);
+    expect(migrated.records.totalEmergencySupportUnits).toBe(0);
+    expect(migrated.records.emergencyMinutes).toBe(0);
+    expect(migrated.records.nextEmergencySeq).toBe(1);
     expect(migrated.venue.cash).toBe(state.venue.cash); // 돈이 생기지 않았다
   });
 
@@ -779,7 +792,10 @@ describe('T15 예약 상태의 예상치는 지어내지 않는다', () => {
 });
 
 describe('T17 운영 현금 부족은 잘못된 상태를 만들지 않는다', () => {
-  it('E. 매출이 없으면 예비금이 정확히 4게임시간 버티고, 그다음 분에 명시적으로 멈춘다', () => {
+  it('E. 매출이 없으면 예비금이 정확히 4게임시간 버티고, 그다음 분에 긴급 운영에 진입한다', () => {
+    // B-3 이전에는 이 지점에서 UnsupportedStateError로 중단했다.
+    // 이제는 긴급 축소 운영이 구현됐으므로 부족액만 지원하며 계속 진행한다.
+    // 검증의 핵심(예비금이 정확히 240분을 버틴다)은 그대로 유지한다.
     const config = demandConfig;
     // 테이블 3개(해금 조건) 중 딜러는 2명뿐 -> 두 테이블을 예약하면 영업 테이블이 0이 된다.
     // 매출이 전혀 없으므로 예비금이 버티는 시간을 정확히 셀 수 있다.
@@ -801,40 +817,52 @@ describe('T17 운영 현금 부족은 잘못된 상태를 만들지 않는다', 
     // 예약 테이블 2개가 전부이므로 이후 신규 착석도 매출도 없다
     let cur = state;
     let survived = 0;
-    let thrown: unknown = null;
+    let startedAt = -1;
+    let firstSupport = -1;
     for (let i = 0; i < 500; i += 1) {
-      try {
-        cur = tick(cur, config).state;
-        survived += 1;
-      } catch (e) {
-        thrown = e;
-        break;
+      const r = tick(cur, config);
+      cur = r.state;
+      for (const e of r.events) {
+        if (e.type === 'emergencyStarted' && startedAt < 0) startedAt = cur.time.minute;
+        if (e.type === 'emergencySupportGranted' && firstSupport < 0) {
+          firstSupport = e.amountUnits;
+        }
       }
+      if (startedAt > 0) break;
+      survived += 1;
     }
 
     expect(cur.records.totalRevenueUnits).toBe(0);
-    // 4게임시간 = 240분을 정확히 버틴 뒤 241분째에 멈춘다
+    // 4게임시간 = 240분을 자기 자금으로 버틴 뒤 그다음 분에 진입한다
     expect(survived).toBe(240);
-    expect(availableCash(cur)).toBe(0);
+    expect(startedAt).toBe(state.time.minute + 241);
+    // 부족액만 지원한다. 분당 비용은 딜러 2명 + 테이블 2개 + 매장 = 260 units.
+    expect(firstSupport).toBe(260);
 
-    expect(thrown).toBeInstanceOf(UnsupportedStateError);
-    expect((thrown as UnsupportedStateError).code).toBe('EMERGENCY_NOT_IMPLEMENTED');
-    // 잠긴 돈을 쓰지 않았고 음수를 잘라내지도 않았다
+    // 잠긴 준비비는 그대로 보존됐고 현금을 음수로 두지 않았다
     expect(cur.venue.lockedCash).toBe(prep);
     expect(cur.venue.cash).toBe(prep);
+    expect(availableCash(cur)).toBe(0);
+    expect(cur.emergency).not.toBeNull();
   });
 
-  it('잠긴 자금이 없을 때의 기존 동작은 그대로다', () => {
+  it('잠긴 자금이 없어도 자기 자금이 마르면 긴급 운영에 진입한다', () => {
+    // B-3 이전에는 현금이 음수가 되고 cashNegative 이벤트만 알렸다.
+    // 이제는 부족액을 지원하므로 현금이 음수가 되지 않는다.
     const config = fixedDemandConfig(0);
     let state = labState({ tables: 5, dealers: 5, cashGold: 10 }, config);
+    let sawEmergency = false;
     let sawNegative = false;
     for (let i = 0; i < 10; i += 1) {
       const r = tick(state, config);
       state = r.state;
+      if (r.events.some((e) => e.type === 'emergencyStarted')) sawEmergency = true;
       if (r.events.some((e) => e.type === 'cashNegative')) sawNegative = true;
+      expect(state.venue.cash).toBeGreaterThanOrEqual(0);
     }
-    expect(sawNegative).toBe(true);
-    expect(state.venue.cash).toBeLessThan(0);
+    expect(sawEmergency).toBe(true);
+    expect(sawNegative).toBe(false);
+    expect(state.records.totalEmergencySupportUnits).toBeGreaterThan(0);
   });
 });
 

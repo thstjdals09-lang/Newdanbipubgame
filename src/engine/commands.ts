@@ -58,6 +58,17 @@ export function validateCommand(
 ): CommandResult {
   const cash = availableCash(state);
 
+  // 긴급 축소 운영 중에는 확장·지출·수동 배치를 모두 막는다 (Economy §11).
+  // 조회·예상치·저장과 기존 세션·대회의 자동 진행은 영향을 받지 않는다.
+  // 미래의 리모델링 요청도 같은 이유로 여기서 막는다 (리모델링 자체는 작업 C).
+  if (state.emergency !== null) {
+    return no(
+      'EMERGENCY_ACTIVE',
+      `긴급 축소 운영(${state.emergency.id}, ${state.emergency.phase}) 중에는 ` +
+        '구매·고용·홍보·대회 예약·수동 배치를 할 수 없다. 복구가 끝나면 해제된다.',
+    );
+  }
+
   switch (command.type) {
     case 'buyTable': {
       if (!canInstallMoreTables(state, config)) {

@@ -209,12 +209,15 @@ export interface EconomyConfig {
 /**
  * 계산 순서·공식·반올림 규칙의 버전.
  *
- * B-1에서 올리지 않았다. 대회 예약은 새로운 상태를 추가했을 뿐
- * 수요·착석·만족도·매출·비용의 공식과 Economy §10의 9단계 순서를 바꾸지 않았다.
- * 예약이 없는 상태(tournament === null)의 모든 계산 결과는 이전과 비트 단위로 같고,
- * 기존 시간 분할·저장 복원·검산 재현 테스트가 그것을 검증한다.
+ * B-1(대회 예약)과 B-2(진행·정산·보상·예상치)에서는 올리지 않았다.
+ * 그 작업들은 상태를 추가했을 뿐 공식과 9단계 순서를 바꾸지 않았다.
+ *
+ * B-3에서 올렸다. 8단계가 "비용 확정 -> 부족액 지원 -> 1회 차감"으로 바뀌었고,
+ * 긴급 운영 중 신규 착석이 유지 대상 테이블 하나로 제한되며,
+ * 9단계가 긴급 축소 처리와 기존 배치 전환 중 하나를 고르게 됐다.
+ * 자금이 마르지 않는 상태의 결과는 이전과 같지만, 규칙 자체가 달라졌으므로 올린다.
  */
-export const RULES_VERSION = 'economy-0.1+adopt-v1';
+export const RULES_VERSION = 'economy-0.2+b3-emergency';
 
 /**
  * 직렬화 스키마 버전.
@@ -228,10 +231,14 @@ export const RULES_VERSION = 'economy-0.1+adopt-v1';
  *   records.completedTournaments
  * 05 §7의 "상태 필드가 추가될 때" 규칙에 해당한다.
  *
- * 두 마이그레이션 모두 의미가 완전히 정의된다 (state.ts의 migrateSave 참조).
+ * 3 -> 4 (B-3): 긴급 축소 운영 상태와 지원금 계정이 추가됐다.
+ *   GameState.emergency
+ *   records.totalEmergencySupportUnits / emergencyMinutes / nextEmergencySeq
+ *
+ * 모든 마이그레이션의 의미가 완전히 정의된다 (state.ts의 migrateSave 참조).
  * v2가 담을 수 있던 대회 상태(없음 / DRAINING / READY)는 그대로 보존한다.
  */
-export const SAVE_VERSION = 3;
+export const SAVE_VERSION = 4;
 
 export const DEFAULT_CONFIG: EconomyConfig = {
   rulesVersion: RULES_VERSION,

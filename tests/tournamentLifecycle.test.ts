@@ -663,12 +663,21 @@ describe('T23 v2 저장본 마이그레이션', () => {
     const raw = JSON.parse(serialize(state)) as Record<string, never>;
     const obj = raw as unknown as {
       saveVersion: number;
+      rulesVersion: string;
       tournament: Record<string, unknown> | null;
       records: Record<string, unknown>;
     };
     obj.saveVersion = 2;
+    // 실제 v2 저장본은 당시 규칙 버전을 달고 있었다.
+    // B-3의 마이그레이션은 (저장 구조, 규칙) 조합을 검사하므로 그대로 흉내 낸다.
+    obj.rulesVersion = 'economy-0.1+adopt-v1';
     delete obj.records['totalTournamentRevenueUnits'];
     delete obj.records['completedTournaments'];
+    delete obj.records['totalEmergencySupportUnits'];
+    delete obj.records['emergencyMinutes'];
+    delete obj.records['nextEmergencySeq'];
+    // emergency 필드 자체는 v2에도 있었다(항상 null). 지우지 않는다.
+    (obj as unknown as Record<string, unknown>)['emergency'] = null;
     if (obj.tournament) {
       delete obj.tournament['startedAtMinute'];
       delete obj.tournament['endsAtMinute'];

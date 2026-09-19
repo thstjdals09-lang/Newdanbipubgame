@@ -518,22 +518,39 @@ describe('미구현 상태는 조용히 무시되지 않는다', () => {
     expect(() => tick(state, config)).toThrow(/리모델링 전환은 작업 C/);
   });
 
-  it('emergency 상태가 있으면 tick이 거부한다', () => {
+  it('알 수 없는 긴급 운영 단계는 tick이 거부한다', () => {
+    // B-3에서 긴급 운영이 구현되면서 유효한 단계는 지원 대상이 됐다.
+    // 정의되지 않은 단계는 여전히 조용히 처리하지 않고 거절한다.
     const state = createInitialState(config);
     (state as { emergency: unknown }).emergency = { active: true };
-    expect(() => tick(state, config)).toThrow(/긴급 축소 운영은 작업 B/);
+    expect(() => tick(state, config)).toThrow(/지원하지 않는 긴급 운영 단계/);
   });
 
-  it('현금이 음수가 되면 이벤트로 알린다 — 조용히 0으로 자르지 않는다', () => {
+  it('자기 자금이 마르면 긴급 축소 운영이 부족액만 지원한다 (B-3)', () => {
+    // B-3 이전에는 현금을 음수로 두고 cashNegative 이벤트만 알렸다.
+    // 이제 긴급 운영이 구현됐으므로 부족액만 지원하며 계속 진행한다.
+    // "조용히 0으로 자르지 않는다"는 원칙은 그대로다 — 지원금을 명시적으로 기록한다.
     const config2 = fixedDemandConfig(0); // 손님 없음 = 비용만 나감
     let state = labState({ tables: 5, dealers: 5, cashGold: 10 }, config2);
-    let sawNegative = false;
+
+    let startedAt = -1;
+    const supports: number[] = [];
     for (let i = 0; i < 10; i += 1) {
       const r = tick(state, config2);
       state = r.state;
-      if (r.events.some((e) => e.type === 'cashNegative')) sawNegative = true;
+      for (const e of r.events) {
+        if (e.type === 'emergencyStarted' && startedAt < 0) startedAt = state.time.minute;
+        if (e.type === 'emergencySupportGranted') supports.push(e.amountUnits);
+      }
+      expect(state.venue.cash).toBeGreaterThanOrEqual(0); // 음수로 두지 않는다
     }
-    expect(sawNegative).toBe(true);
-    expect(state.venue.cash).toBeLessThan(0); // 사실대로 음수로 남는다
+
+    // 분당 비용 = 5x80 + 5x30 + 40 = 590 units. 시작 자금 600 units로 1분은 버틴다.
+    expect(startedAt).toBe(2);
+    expect(supports.length).toBeGreaterThan(0);
+    expect(state.records.totalEmergencySupportUnits).toBe(supports.reduce((a, b) => a + b, 0));
+    // 지원금은 매출·일회성 지출과 섞이지 않는다
+    expect(state.records.totalRevenueUnits).toBe(0);
+    expect(state.records.totalOneOffUnits).toBe(0);
   });
 });
