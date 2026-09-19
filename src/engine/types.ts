@@ -216,6 +216,49 @@ export interface EmergencyState {
   supportedMinutes: number;
 }
 
+/* ------------------------------------------------------------------ */
+/* 리모델링 (작업 C-1)                                                   */
+/* ------------------------------------------------------------------ */
+
+/**
+ * 리모델링 단계.
+ *
+ *   PREPARING  공사 준비 중. 신규 방문을 받지 않고 기존 세션이 끝나기를 기다린다.
+ *
+ * 모든 일반 세션이 끝나면 9단계가 단일 전환 작업으로 2단계 매장을 확정하고
+ * GameState.remodel을 null로 만든다. 따로 "전환 중" 단계를 두지 않는 이유는
+ * 전환이 한 틱 안에서 끝나는 원자적 작업이기 때문이다 (Progression §6).
+ */
+export type RemodelPhase = 'PREPARING';
+
+/**
+ * 리모델링 작업. **권위 있는 유일한 저장소다.**
+ *
+ * 준비 기간 동안 15,000G가 잠겨 있고, 전환 시점에 정확히 한 번 지출로 확정된다.
+ */
+export interface RemodelState {
+  readonly id: string;
+  phase: RemodelPhase;
+  readonly startedAtMinute: GameMinute;
+  /** 잠근 리모델링 비용. 전환 시 settleLocked로 한 번만 지출된다. */
+  readonly costUnits: Money;
+  readonly fromStage: Stage;
+  readonly toStage: Stage;
+}
+
+/** 완료된 리모델링의 영구 기록. 중복 전환 방지의 신원이다. */
+export interface RemodelCompletionRecord {
+  readonly id: string;
+  readonly fromStage: Stage;
+  readonly toStage: Stage;
+  readonly startedAtMinute: GameMinute;
+  readonly completedAtMinute: GameMinute;
+  readonly costUnits: Money;
+  /** 전환 시점에 보존한 테이블 ID. 자산 보존을 사후에 대조할 수 있게 남긴다. */
+  readonly preservedTableIds: readonly TableId[];
+  readonly preservedStaffIds: readonly StaffId[];
+}
+
 export interface UnlockRecord {
   readonly id: string;
   readonly grantedAtMinute: GameMinute;
@@ -275,8 +318,11 @@ export interface GameState {
    * 그 밖의 단계는 assertSupported가 미지원으로 거절한다.
    */
   tournament: TournamentReservation | null;
-  /** 작업 C. null이 아니면 엔진이 거절한다. */
-  remodel: null;
+  /**
+   * 리모델링. C-1이 만들고 소유한다.
+   * 준비 단계(PREPARING)만 존재하며 전환은 9단계에서 한 틱에 끝난다.
+   */
+  remodel: RemodelState | null;
   /**
    * 긴급 축소 운영. B-3이 만들고 소유한다.
    * null이면 평시다.
@@ -337,6 +383,10 @@ export interface GameState {
 
     /** 완료된 대회 기록. 중복 정산 방지의 신원이다. */
     completedTournaments: TournamentCompletionRecord[];
+
+    /** 완료된 리모델링 기록. 중복 전환·중복 지출 방지의 신원이다. */
+    completedRemodels: RemodelCompletionRecord[];
+    nextRemodelSeq: number;
   };
 
   window: AbandonWindow;
@@ -362,7 +412,12 @@ export type Command =
    * 플레이어가 테이블 ID 2개를 **명시적으로** 고른다.
    * 딜러는 그 테이블의 현재 담당자에서 파생한다. 자동 선택은 없다 (05 R9).
    */
-  | { readonly type: 'reserveSmallTournament'; readonly tableIds: readonly TableId[] };
+  | { readonly type: 'reserveSmallTournament'; readonly tableIds: readonly TableId[] }
+  /**
+   * 리모델링 요청 (C-1).
+   * 1단계 매장을 2단계로 확장한다. 조건과 비용은 planRemodel이 판정한다.
+   */
+  | { readonly type: 'requestRemodel' };
 
 export type RejectReason =
   | 'INSUFFICIENT_CASH'
@@ -397,7 +452,22 @@ export type RejectReason =
   | 'TOURNAMENT_RESERVE_SHORTFALL'
   | 'REMODEL_IN_PROGRESS'
   /** 긴급 축소 운영 중에는 확장·지출·수동 배치를 할 수 없다 (Economy §11) */
-  | 'EMERGENCY_ACTIVE';
+  | 'EMERGENCY_ACTIVE'
+  // 리모델링 (C-1)
+  /**
+   * 리모델링 공사 중이라 이 명령을 할 수 없다.
+   * 대회 예약 검증의 REMODEL_IN_PROGRESS("리모델링 중이라 대회를 열 수 없다")와
+   * 의미가 다르므로 별도 코드를 쓴다.
+   */
+  | 'REMODEL_ACTIVE'
+  | 'REMODEL_ALREADY_DONE'
+  | 'REMODEL_STAGE_NOT_ELIGIBLE'
+  | 'REMODEL_TABLES_REQUIRED'
+  | 'REMODEL_AWARENESS_REQUIRED'
+  | 'REMODEL_TOURNAMENTS_REQUIRED'
+  | 'REMODEL_TOURNAMENT_ACTIVE'
+  | 'REMODEL_DEALER_CHANGE_PENDING'
+  | 'REMODEL_RESERVE_SHORTFALL';
 
 export interface CommandResult {
   readonly ok: boolean;
@@ -427,7 +497,11 @@ export type EngineEvent =
   | { readonly type: 'emergencyStarted'; readonly emergencyId: string; readonly atMinute: GameMinute }
   | { readonly type: 'emergencySupportGranted'; readonly emergencyId: string; readonly atMinute: GameMinute; readonly amountUnits: Money }
   | { readonly type: 'emergencyKeptSelected'; readonly emergencyId: string; readonly tableId: TableId; readonly dealerId: StaffId }
-  | { readonly type: 'emergencyEnded'; readonly emergencyId: string; readonly atMinute: GameMinute; readonly totalSupportUnits: Money };
+  | { readonly type: 'emergencyEnded'; readonly emergencyId: string; readonly atMinute: GameMinute; readonly totalSupportUnits: Money }
+  | { readonly type: 'emergencyDownsizeDeferred'; readonly emergencyId: string; readonly remodelId: string }
+  | { readonly type: 'remodelRequested'; readonly remodelId: string; readonly costUnits: Money; readonly atMinute: GameMinute }
+  | { readonly type: 'remodelQueueDissolved'; readonly remodelId: string; readonly guests: number }
+  | { readonly type: 'remodelCompleted'; readonly remodelId: string; readonly atMinute: GameMinute; readonly fromStage: Stage; readonly toStage: Stage; readonly costUnits: Money };
 
 export interface TickResult {
   readonly state: GameState;

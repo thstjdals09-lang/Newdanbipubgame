@@ -179,18 +179,25 @@ describe('정상 상태의 저장 복원은 그대로 유지된다', () => {
 
 describe('지원하는 과거 버전 마이그레이션은 유지된다', () => {
   const LEGACY = 'economy-0.1+adopt-v1';
+  const LEGACY_V4 = 'economy-0.2+b3-emergency';
 
   /** 과거 버전 저장본. 그 버전에 실제로 없던 필드만 제거한다. */
   function asLegacy(state: GameState, saveVersion: number): string {
     const raw = JSON.parse(serialize(state)) as Record<string, unknown>;
     raw['saveVersion'] = saveVersion;
-    raw['rulesVersion'] = LEGACY;
+    // 각 저장 구조 버전이 실제로 달고 있던 계산 규칙 버전
+    raw['rulesVersion'] = saveVersion <= 3 ? LEGACY : LEGACY_V4;
     const rec = raw['records'] as Record<string, unknown>;
 
-    // v4에서 추가된 필드
-    delete rec['totalEmergencySupportUnits'];
-    delete rec['emergencyMinutes'];
-    delete rec['nextEmergencySeq'];
+    // v5에서 추가된 필드
+    delete rec['completedRemodels'];
+    delete rec['nextRemodelSeq'];
+    if (saveVersion <= 3) {
+      // v4에서 추가된 필드
+      delete rec['totalEmergencySupportUnits'];
+      delete rec['emergencyMinutes'];
+      delete rec['nextEmergencySeq'];
+    }
     if (saveVersion <= 2) {
       // v3에서 추가된 필드
       delete rec['totalTournamentRevenueUnits'];
@@ -204,16 +211,18 @@ describe('지원하는 과거 버전 마이그레이션은 유지된다', () => 
     return JSON.stringify(raw);
   }
 
-  for (const version of [1, 2, 3]) {
-    it(`v${version} -> v4 마이그레이션이 통과한다`, () => {
+  for (const version of [1, 2, 3, 4]) {
+    it(`v${version} -> v5 마이그레이션이 통과한다`, () => {
       const state = run(createInitialState(DEFAULT_CONFIG), 300, DEFAULT_CONFIG);
       const migrated = deserialize(asLegacy(state, version), DEFAULT_CONFIG);
 
-      expect(migrated.saveVersion).toBe(4);
+      expect(migrated.saveVersion).toBe(5);
       expect(migrated.tournament).toBeNull();
       expect(migrated.emergency).toBeNull();
       expect(migrated.records.nextTournamentSeq).toBe(1);
       expect(migrated.records.totalEmergencySupportUnits).toBe(0);
+      expect(migrated.records.completedRemodels).toEqual([]);
+      expect(migrated.records.nextRemodelSeq).toBe(1);
       // 자산·누계 보존
       expect(migrated.venue.cash).toBe(state.venue.cash);
       expect(migrated.records.completedGuests).toBe(state.records.completedGuests);

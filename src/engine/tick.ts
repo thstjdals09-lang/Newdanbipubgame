@@ -9,7 +9,7 @@
  *   6. 대기 만료 -> 기존 대기 -> 신규 방문 순으로 착석. 잔여는 대기 또는 이탈.
  *   7. 서비스 품질·최근 이탈률·만족도를 갱신하고 세션 인지도 보상을 반영한다.
  *   8. 급여·시설비·운영비를 해당 1분만큼 차감한다. 부족하면 긴급 지원 후 차감한다.
- *   9. 해금·특별 직원 지급·(긴급 축소 또는 배치 전환)을 판정하고 저장 대상으로 만든다.
+ *   9. 해금·특별 직원 지급·(긴급 축소 또는 배치 전환)·리모델링 전환을 판정한다.
  *
  * 순서를 바꾸면 같은 조건의 재현 결과가 바뀌므로 rulesVersion을 올려야 한다.
  */
@@ -30,6 +30,7 @@ import {
   assertSupported,
   cloneState,
 } from './state.js';
+import { SECOND_THEME_UNLOCK_ID, isRemodelPreparing, processRemodel } from './remodel.js';
 import { processTournament } from './tournament.js';
 import type { Command, EngineEvent, GameState, TickResult } from './types.js';
 
@@ -51,6 +52,10 @@ function processUnlocks(state: GameState, config: EconomyConfig, events: EngineE
     tables >= config.unlock.smallTournamentTableCount &&
       state.venue.awarenessMilli >= config.unlock.smallTournamentAwarenessMilli,
   );
+  // 2단계 도달로 두 번째 테마가 열린다 (Progression §4).
+  // 조건으로 판정하므로 리모델링 전환 코드가 따로 부여하지 않아도 되고,
+  // 기존 ID 검사가 중복 부여를 막는다.
+  grant(SECOND_THEME_UNLOCK_ID, state.venue.stage >= 2);
 }
 
 /**
@@ -208,17 +213,26 @@ export function tick(
   state.sessions = remaining;
 
   // 5) 수요. 갱신 전 만족도와 현재 인지도를 쓴다.
-  const arrival = stepArrivals(state, config);
+  //    리모델링 공사 중에는 신규 방문 생성을 멈춘다 (Progression §6).
+  //    누적값도 함께 멈춘다. 계속 쌓으면 공사가 끝나는 순간 손님이 몰려나온다.
+  const arrival = isRemodelPreparing(state)
+    ? { newGuests: 0, carry: state.time.arrivalCarry }
+    : stepArrivals(state, config);
   state.time.arrivalCarry = arrival.carry;
 
   // 6) 대기·착석
   const seating = processSeating(state, config, arrival.newGuests, events);
 
   // 7) 서비스 품질·이탈률·만족도, 그리고 세션 인지도 보상
+  //    공사 중에도 윈도우에는 이번 분의 사실(방문 0, 이탈 0)을 그대로 기록한다.
+  //    해산한 대기 손님을 이탈로 넣지 않으며 허위 방문 기록도 만들지 않는다.
   recordWindow(state, seating.arrivals, seating.abandons);
-  const sat = stepSatisfaction(state, config);
-  state.venue.satisfactionMilli = sat.satisfactionMilli;
-  state.venue.satisfactionRemainder = sat.remainder;
+  if (!isRemodelPreparing(state)) {
+    // 만족도는 공사 기간 고정한다 (Progression §6).
+    const sat = stepSatisfaction(state, config);
+    state.venue.satisfactionMilli = sat.satisfactionMilli;
+    state.venue.satisfactionRemainder = sat.remainder;
+  }
 
   if (completedThisMinute > 0) {
     // 채택 R4: 인지도는 모든 경로에서 100을 넘지 않는다.
@@ -245,11 +259,19 @@ export function tick(
   if (state.emergency !== null) {
     // 긴급 운영 중에는 축소 계획이 일반 pendingDealerId 전환을 대신한다.
     // 두 소유자가 같은 테이블을 동시에 건드리지 않게 한 쪽만 실행한다.
+    // 리모델링 공사 중이면 processEmergency가 축소를 유예한다 (C-1).
     state.records.emergencyMinutes += 1;
     processEmergency(state, config, events);
-  } else {
+  } else if (state.remodel === null) {
+    // 공사 중에는 기존 배치를 그대로 유지한다. 배치 전환도 멈춘다.
+    // (요청 시점에 대기 중인 교체 예약이 없음을 planRemodel이 보장한다.)
     applyPendingDealerChanges(state, events);
   }
+
+  // 리모델링 전환은 9단계의 마지막이다.
+  // 세션 정산(4단계)이 끝난 같은 분에 전환되고, 2단계 수요는 다음 분 5단계부터 적용된다.
+  // 긴급 축소보다 뒤에 두어, 공사가 끝난 뒤의 유예 축소가 같은 분에 겹치지 않게 한다.
+  processRemodel(state, config, events);
 
   assertInvariants(state);
   return { state, events };

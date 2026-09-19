@@ -68,6 +68,8 @@ export function createInitialState(config: EconomyConfig = DEFAULT_CONFIG): Game
       emergencyMinutes: 0,
       nextEmergencySeq: 1,
       completedTournaments: [],
+      completedRemodels: [],
+      nextRemodelSeq: 1,
     },
 
     window: {
@@ -111,7 +113,8 @@ export function cloneState(state: GameState): GameState {
             tableIds: [...state.tournament.tableIds],
             dealerIds: [...state.tournament.dealerIds],
           },
-    remodel: state.remodel,
+    // 리모델링 작업도 깊게 복제한다. 얕게 두면 예상치의 두 분기가 같은 레코드를 공유한다.
+    remodel: state.remodel === null ? null : { ...state.remodel },
     // 긴급 운영 상태도 깊게 복제한다. 얕게 두면 예상치의 두 분기가 같은
     // 레코드를 공유해 단계·지원금 누계가 원본으로 새어 나간다.
     emergency: state.emergency === null ? null : { ...state.emergency },
@@ -123,6 +126,11 @@ export function cloneState(state: GameState): GameState {
         ...c,
         tableIds: [...c.tableIds],
         dealerIds: [...c.dealerIds],
+      })),
+      completedRemodels: state.records.completedRemodels.map((c) => ({
+        ...c,
+        preservedTableIds: [...c.preservedTableIds],
+        preservedStaffIds: [...c.preservedStaffIds],
       })),
     },
     window: {
@@ -163,10 +171,11 @@ export function assertSupported(state: GameState, config: EconomyConfig): void {
       );
     }
   }
-  if (state.remodel !== null) {
+  const remodel = state.remodel;
+  if (remodel !== null && remodel.phase !== 'PREPARING') {
     throw new UnsupportedStateError(
       'REMODEL_NOT_IMPLEMENTED',
-      '리모델링 전환은 작업 C에서 구현한다. 이 상태로는 계산할 수 없다.',
+      `지원하지 않는 리모델링 단계: ${String(remodel.phase)}`,
     );
   }
   const emergency = state.emergency;
@@ -400,10 +409,64 @@ function migrateV3ToV4(raw: GameState): GameState {
   if (migrated.records.nextEmergencySeq === undefined) {
     migrated.records.nextEmergencySeq = 1;
   }
-  // 위에서 확인한 과거 규칙 버전에서 현재 규칙 버전으로만 올린다.
+  // 위에서 확인한 과거 규칙 버전에서 v4 시절의 규칙 버전으로만 올린다.
+  // 체인의 다음 단계(v4 -> v5)가 다시 검사하고 현재 버전으로 올린다.
   // 경제 수치는 하나도 건드리지 않는다.
-  migrated.rulesVersion = RULES_VERSION;
+  migrated.rulesVersion = LEGACY_RULES_VERSION_V4;
   migrated.saveVersion = 4;
+  return migrated;
+}
+
+/** saveVersion 4가 함께 쓰던 유일한 계산 규칙 버전 */
+const LEGACY_RULES_VERSION_V4 = 'economy-0.2+b3-emergency';
+
+/**
+ * v4 -> v5 (C-1): 리모델링 상태와 완료 기록이 추가됐다.
+ *   records.completedRemodels   [] 로 초기화 (v4는 리모델링을 완료한 적이 없다)
+ *   records.nextRemodelSeq      1 로 초기화
+ *
+ * remodel 필드 자체는 작업 A(v1)부터 항상 있었으므로 초기화하지 않고 값만 확인한다.
+ * v4는 리모델링 작업을 표현할 수 없었으므로 null이어야 한다.
+ *
+ * 계산 규칙도 함께 바뀌었으므로 rulesVersion을 올린다.
+ * v4 상태는 새 규칙에서도 그대로 유효하다. 달라지는 것은 리모델링이 걸린 동안의
+ * 처리뿐이며, v4에서 그 상태는 존재할 수 없었다.
+ *
+ * 완료된 대회 기록, 준비비 잠금, 직원 보상 지급 기록, 긴급 운영 누계,
+ * 나머지 누적값은 모두 보존한다.
+ */
+function migrateV4ToV5(raw: GameState): GameState {
+  if (raw.rulesVersion !== LEGACY_RULES_VERSION_V4) {
+    throw new UnsupportedStateError(
+      'RULES_VERSION_MISMATCH',
+      `saveVersion 4와 함께 존재한 계산 규칙 버전은 ${LEGACY_RULES_VERSION_V4}뿐이다. ` +
+        `받은 값: ${String(raw.rulesVersion)}. 알 수 없는 조합이므로 변환하지 않는다.`,
+    );
+  }
+
+  const migrated = raw as GameState & {
+    records: {
+      completedRemodels?: GameState['records']['completedRemodels'];
+      nextRemodelSeq?: number;
+    };
+  };
+
+  if (migrated.remodel !== null) {
+    throw new UnsupportedStateError(
+      'SAVE_VERSION_MISMATCH',
+      'v4 저장본에 리모델링 작업이 들어 있다. v4는 이를 표현할 수 없으므로 마이그레이션 의미가 정의되지 않는다.',
+    );
+  }
+
+  // v4에 실제로 없던 필드만 초기화한다.
+  if (migrated.records.completedRemodels === undefined) {
+    migrated.records.completedRemodels = [];
+  }
+  if (migrated.records.nextRemodelSeq === undefined) {
+    migrated.records.nextRemodelSeq = 1;
+  }
+  migrated.rulesVersion = RULES_VERSION;
+  migrated.saveVersion = 5;
   return migrated;
 }
 
@@ -417,6 +480,7 @@ function migrateSave(raw: GameState): GameState {
   if (current.saveVersion === 1) current = migrateV1ToV2(current);
   if (current.saveVersion === 2) current = migrateV2ToV3(current);
   if (current.saveVersion === 3) current = migrateV3ToV4(current);
+  if (current.saveVersion === 4) current = migrateV4ToV5(current);
 
   if (current.saveVersion !== SAVE_VERSION) {
     throw new UnsupportedStateError(

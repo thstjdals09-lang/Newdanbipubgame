@@ -16,6 +16,7 @@ export * from './costs.js';
 export * from './cash.js';
 export * from './commands.js';
 export * from './tournament.js';
+export * from './remodel.js';
 export * from './tick.js';
 export * from './forecast.js';
 

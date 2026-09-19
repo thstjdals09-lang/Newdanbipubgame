@@ -32,6 +32,8 @@ export function findTable(state: GameState, id: string): TableState | undefined 
  */
 export function canSeatNewGuests(state: GameState, table: TableState): boolean {
   if (table.status !== 'operating') return false;
+  // 리모델링 공사 중에는 어떤 테이블도 신규 손님을 받지 않는다 (Progression §6).
+  if (state.remodel !== null) return false;
   const emergency = state.emergency;
   if (emergency === null) return true;
   return emergency.keptTableId === table.id;

@@ -14,7 +14,7 @@
  */
 
 import type { EconomyConfig } from '../config/economy.js';
-import { minuteCosts } from './costs.js';
+import { minuteCosts, perMinuteUnits } from './costs.js';
 import { availableCash, findStaff, findTable } from './derive.js';
 import { assertSafeInteger } from './fixed.js';
 import type {
@@ -389,9 +389,69 @@ export function recoveryThresholdUnits(state: GameState, config: EconomyConfig):
 }
 
 /**
+ * 축소를 유예하는 동안 쓸 종료 기준액 (C-1).
+ *
+ * B-3의 자금 조건은 "**축소 완료 상태의** 분당 반복 비용 x 240"이다.
+ * 공사 중에는 축소를 유예하므로 그 상태가 아직 만들어지지 않았을 뿐,
+ * 재는 잣대까지 달라질 이유는 없다. 그래서 축소했다면 남았을 배치
+ * (유지 테이블 1개 + 그 담당 딜러 1명 + 매장 기본비)의 비용으로 기준액을 만든다.
+ *
+ * 현재 배치의 비용으로 재면 기준액이 실제 B-3보다 커져서, 공사 중에 이미
+ * 자금이 회복된 매장도 종료 판정을 통과하지 못한다. 그러면 공사가 끝난 다음 분에
+ * B-3가 정상 경로로 매장을 1테이블까지 줄였다가 같은 틱에서 긴급 운영을 끝낸다.
+ * 사용자 결정 ①이 금지한 "불필요한 축소"가 바로 이 경우다.
+ *
+ * 새 상수를 만들지 않는다. 급여·시설비·매장 기본비 모두 기존 설정값이고,
+ * 환산도 기존 perMinuteUnits를 그대로 쓴다.
+ */
+function deferredRecoveryThresholdUnits(state: GameState, config: EconomyConfig): Money {
+  const current = recoveryThresholdUnits(state, config);
+
+  const picked = selectKeptPair(state, config);
+  if (picked === null) return current; // 유지할 조합이 없으면 줄어들 비용을 알 수 없다
+  const dealer = findStaff(state, picked.dealerId);
+  if (!dealer || dealer.type === 'service') return current;
+
+  const perMinute =
+    perMinuteUnits(config.staff[dealer.type].wagePerHourGold) +
+    perMinuteUnits(config.table.facilityCostPerHourGold) +
+    perMinuteUnits(config.venue.baseCostPerHourGold);
+  const downsized = perMinute * RECOVERY_RESERVE_MINUTES;
+
+  // 축소가 비용을 늘리는 일은 없다. 늘어났다면 투영이 실제 축소와 어긋난 것이다.
+  if (downsized > current) {
+    throw new Error(
+      `축소 후 기준액이 현재 기준액보다 크다: ${downsized} > ${current}. 비용 투영이 실제 축소와 다르다.`,
+    );
+  }
+  return downsized;
+}
+
+/**
+ * 리모델링 준비 중 축소를 유예할 때의 종료 조건 (C-1, B-1 결정 ①).
+ *
+ * B-3의 정상 종료 조건은 "축소 완료 + 잠긴 준비비 0 + 예비금 확보"다.
+ * 공사 중에는 축소를 유예하므로 앞의 두 가지를 그대로 쓸 수 없다.
+ * 특히 리모델링 비용 15,000G가 잠겨 있으므로 "잠금 0"은 성립할 수 없다.
+ *
+ * 남는 것은 자금 조건이다. **잠긴 돈을 제외한 자기 자금**이 B-3와 같은 기준액
+ * (축소했다면 남았을 배치의 4게임시간 운영비) 이상이면 긴급 운영을 끝낸다.
+ * 잠긴 리모델링 비용은 availableCash에서 이미 빠져 있으므로 이 판정에 섞이지 않는다.
+ *
+ * 공사 중에 이 조건을 충족하면 축소 없이 긴급 운영이 끝나고,
+ * 공사가 끝난 뒤에 뒤늦은 축소가 실행되지 않는다 (사용자 결정 ①).
+ */
+function canEndDeferredEmergency(state: GameState, config: EconomyConfig): boolean {
+  // 대회 자원이 묶여 있으면 아직 정상 상태가 아니다.
+  if (state.tournament !== null) return false;
+  return availableCash(state) >= deferredRecoveryThresholdUnits(state, config);
+}
+
+/**
  * 틱 9단계의 긴급 운영 처리.
  *
  * 순서가 규칙이다 (사용자 지정 §8).
+ *   0) 리모델링 준비 중이면 축소를 유예하고 돌아간다 (C-1)
  *   1) 일반 딜러 교체 예약 해제  <- 유지 대상 선택보다 반드시 먼저
  *   2) 서비스 직원 대기 전환
  *   3) 유지 대상 선택 (한 번 고르면 끝까지 유지)
@@ -409,6 +469,32 @@ export function processEmergency(
 ): void {
   const emergency = state.emergency;
   if (emergency === null) return;
+
+  // 리모델링 준비 중에는 테이블·딜러 축소를 **유예**한다 (C-1, B-1 결정 ①).
+  //
+  // 8단계의 부족액 지원은 이미 정상 처리됐다. 여기서는 자원을 건드리지 않는다.
+  // 축소하면 "기존 테이블·직원 배치 유지"라는 리모델링의 전제가 깨지기 때문이다.
+  //
+  // 잠긴 리모델링 비용은 availableCash에서 이미 빠져 있으므로 지원 계산에 섞이지 않는다.
+  // 공사가 끝나면 다음 분의 이 함수가 유예된 축소를 정상 적용한다.
+  if (state.remodel !== null) {
+    if (canEndDeferredEmergency(state, config)) {
+      events.push({
+        type: 'emergencyEnded',
+        emergencyId: emergency.id,
+        atMinute: state.time.minute,
+        totalSupportUnits: emergency.supportUnits,
+      });
+      state.emergency = null;
+      return;
+    }
+    events.push({
+      type: 'emergencyDownsizeDeferred',
+      emergencyId: emergency.id,
+      remodelId: state.remodel.id,
+    });
+    return;
+  }
 
   // 예약 해제가 선택보다 먼저다. 순서를 바꾸면 취소될 예약에 묶인 대기 딜러가
   // 후보에서 빠져 더 비싼 조합이 선택된다.

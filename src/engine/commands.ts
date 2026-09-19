@@ -19,6 +19,7 @@ import {
   installedTableCount,
   tablePriceGold,
 } from './derive.js';
+import { applyRemodelRequest, planRemodel } from './remodel.js';
 import { applyReservation, isDealerReserved, planSmallTournament } from './tournament.js';
 import type {
   Command,
@@ -66,6 +67,16 @@ export function validateCommand(
       'EMERGENCY_ACTIVE',
       `긴급 축소 운영(${state.emergency.id}, ${state.emergency.phase}) 중에는 ` +
         '구매·고용·홍보·대회 예약·수동 배치를 할 수 없다. 복구가 끝나면 해제된다.',
+    );
+  }
+
+  // 리모델링 공사 중에는 구매·고용·배치 변경·대회 예약을 잠근다 (Progression §6).
+  // 대회 예약 검증의 REMODEL_IN_PROGRESS와 달리, 이쪽은 "지금 이 명령을 못 한다"는 뜻이다.
+  if (state.remodel !== null) {
+    return no(
+      'REMODEL_ACTIVE',
+      `리모델링 공사(${state.remodel.id}) 중에는 구매·고용·홍보·대회 예약·수동 배치를 ` +
+        '할 수 없다. 공사가 끝나면 해제된다.',
     );
   }
 
@@ -153,6 +164,11 @@ export function validateCommand(
       if (costGold === undefined) return no('AMENITY_MAX_LEVEL');
       if (gold(costGold) > cash) return no('INSUFFICIENT_CASH');
       return ok;
+    }
+
+    case 'requestRemodel': {
+      // 자격 판정은 remodel.ts가 단독으로 소유한다.
+      return planRemodel(state, config).result;
     }
 
     case 'reserveSmallTournament': {
@@ -289,6 +305,15 @@ export function applyCommand(
       if (costGold === undefined) throw new Error('upgradeAmenity: 검증을 통과하지 않은 명령');
       spend(state, gold(costGold), `amenity:L${next}`);
       state.venue.amenityLevel = next;
+      return;
+    }
+
+    case 'requestRemodel': {
+      const { result, plan } = planRemodel(state, config);
+      if (!result.ok || !plan) {
+        throw new Error('requestRemodel: 검증을 통과하지 않은 명령');
+      }
+      applyRemodelRequest(state, plan, events);
       return;
     }
 

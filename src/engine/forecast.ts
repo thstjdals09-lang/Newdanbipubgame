@@ -199,6 +199,20 @@ export function forecast(
     };
   }
 
+  // 리모델링이 걸린 상태도 같은 이유로 예측하지 않는다 (C-1).
+  // 공사 중에는 신규 방문이 멈추고 비용 15,000G가 잠겨 있다가 전환 시 지출된다.
+  // 일반 투자 회계 필드로는 이 현금흐름을 올바르게 표현할 수 없다.
+  if (original.remodel !== null) {
+    return {
+      supported: false,
+      code: 'REMODEL_NOT_IMPLEMENTED',
+      detail:
+        `리모델링 공사 ${original.remodel.id}(${original.remodel.phase}) 상태다. ` +
+        '공사 중에는 신규 방문이 멈추고 비용이 잠겨 있다가 전환 시 지출되므로, ' +
+        '일반 투자 예상치의 회계로는 표현할 수 없다. 전용 예상치는 후속 작업이다.',
+    };
+  }
+
   const check = validateCommand(original, command, config);
   if (!check.ok) {
     const reason = check.reason as RejectReason;
@@ -207,6 +221,17 @@ export function forecast(
       code: 'COMMAND_REJECTED',
       detail: check.detail ?? `명령이 거절됨: ${reason}`,
       reason,
+    };
+  }
+
+  // 리모델링을 요청하는 명령도 마찬가지다.
+  if (command.type === 'requestRemodel') {
+    return {
+      supported: false,
+      code: 'REMODEL_NOT_IMPLEMENTED',
+      detail:
+        '리모델링 요청의 예상치는 공사 기간의 영업 중단과 전환 시 지출까지 계산해야 한다. ' +
+        '이 함수의 일반 투자 회계 필드로는 표현할 수 없다. 전용 예상치는 후속 작업이다.',
     };
   }
 
@@ -315,6 +340,8 @@ export type TournamentForecastUnsupportedCode =
   | 'TOURNAMENT_ALREADY_ACTIVE'
   /** 지평 안에서 대회가 끝나지 않았다. 지평을 늘리거나 정산을 지어내지 않는다 */
   | 'TOURNAMENT_INCOMPLETE_AT_HORIZON';
+// 리모델링 공사 중이라 비교 전제가 성립하지 않는 경우는 UnsupportedCode의
+// REMODEL_NOT_IMPLEMENTED로 돌려준다 (C-1). 별도 코드를 두지 않는다.
 
 export interface TournamentForecastUnsupported {
   readonly supported: false;
@@ -504,6 +531,17 @@ export function forecastSmallTournament(
       detail:
         `이미 대회 ${original.tournament.id}(${original.tournament.phase})가 진행 중이다. ` +
         '일반 영업 반사실을 현재 상태에서 복원할 수 없으므로 비교 예측을 만들지 않는다.',
+    };
+  }
+
+  // 공사 중에는 신규 방문이 멈추므로 대회 비교 예측의 전제가 성립하지 않는다.
+  if (original.remodel !== null) {
+    return {
+      supported: false,
+      code: 'REMODEL_NOT_IMPLEMENTED',
+      detail:
+        `리모델링 공사 ${original.remodel.id} 중이다. 공사 중에는 신규 방문이 멈추고 ` +
+        '대회를 예약할 수도 없으므로 비교 예측을 만들지 않는다.',
     };
   }
 

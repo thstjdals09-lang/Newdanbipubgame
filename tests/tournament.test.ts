@@ -570,9 +570,9 @@ describe('T12 예약 소유권이 저장·복원을 견딘다', () => {
     expect(serialize(broken)).toBe(serialize(straight));
   });
 
-  it('saveVersion은 4이고 v1 저장본은 v1->v2->v3->v4 체인으로 읽힌다', () => {
-    // B-3에서 saveVersion이 3 -> 4로 올랐다. 체인 마이그레이션이 끝까지 이어져야 한다.
-    expect(SAVE_VERSION).toBe(4);
+  it('saveVersion은 5이고 v1 저장본은 v1->v2->v3->v4->v5 체인으로 읽힌다', () => {
+    // B-3에서 3 -> 4, C-1에서 4 -> 5로 올랐다. 체인이 끝까지 이어져야 한다.
+    expect(SAVE_VERSION).toBe(5);
     const state = run(createInitialState(DEFAULT_CONFIG), 50, DEFAULT_CONFIG);
     const v1 = JSON.parse(serialize(state)) as Record<string, unknown>;
     v1['saveVersion'] = 1;
@@ -591,7 +591,7 @@ describe('T12 예약 소유권이 저장·복원을 견딘다', () => {
     v1['emergency'] = null;
 
     const migrated = deserialize(JSON.stringify(v1), DEFAULT_CONFIG);
-    expect(migrated.saveVersion).toBe(4);
+    expect(migrated.saveVersion).toBe(5);
     expect(migrated.tournament).toBeNull();
     expect(migrated.emergency).toBeNull();
     expect(migrated.records.nextTournamentSeq).toBe(1);
@@ -907,10 +907,19 @@ describe('T18 예약은 해금·참가자·기존 대회·리모델링 제약을
   it('리모델링이 진행 중이면 거절한다 (P08)', () => {
     const config = demandConfig;
     const state = reservableState(config);
-    (state as { remodel: unknown }).remodel = { id: 'RM1' };
+    (state as { remodel: unknown }).remodel = { id: 'RM1', phase: 'PREPARING' };
+
+    // C-1에서 공사 중 명령 차단 관문이 앞에 생겼다.
+    // validateCommand는 "지금 이 명령을 못 한다"는 REMODEL_ACTIVE를 돌려준다.
     const r = validateCommand(state, RESERVE, config);
     expect(r.ok).toBe(false);
-    expect(r.reason).toBe('REMODEL_IN_PROGRESS');
+    expect(r.reason).toBe('REMODEL_ACTIVE');
+
+    // 대회 자격 판정 자체의 사유는 그대로 보존된다.
+    // "리모델링 때문에 대회를 열 수 없다"는 별도 의미다.
+    const plan = planSmallTournament(state, ['T1', 'T2'], config);
+    expect(plan.result.ok).toBe(false);
+    expect(plan.result.reason).toBe('REMODEL_IN_PROGRESS');
   });
 
   it('준비비를 못 내면 거절한다 (P09)', () => {

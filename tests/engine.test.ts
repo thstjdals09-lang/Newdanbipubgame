@@ -512,10 +512,12 @@ describe('미구현 상태는 조용히 무시되지 않는다', () => {
     expect(() => tick(state, config)).toThrow(/대회 진행은 작업 B/);
   });
 
-  it('remodel 상태가 있으면 tick이 거부한다', () => {
+  it('알 수 없는 리모델링 단계는 tick이 거부한다', () => {
+    // C-1에서 리모델링이 구현되면서 PREPARING은 지원 대상이 됐다.
+    // 정의되지 않은 단계는 여전히 조용히 처리하지 않고 거절한다.
     const state = createInitialState(config);
     (state as { remodel: unknown }).remodel = { id: 'X' };
-    expect(() => tick(state, config)).toThrow(/리모델링 전환은 작업 C/);
+    expect(() => tick(state, config)).toThrow(/지원하지 않는 리모델링 단계/);
   });
 
   it('알 수 없는 긴급 운영 단계는 tick이 거부한다', () => {

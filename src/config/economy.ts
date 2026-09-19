@@ -180,6 +180,24 @@ export interface EconomyConfig {
   };
 
   /**
+   * [초안 Progression §3·§5] 리모델링 (1단계 -> 2단계).
+   *
+   * 조건 수치는 Progression §5의 "확정 조건을 구체화하는 검증용 문턱"이다.
+   * 설치 테이블 수 요건은 1단계 상한(capByStage[1])에서 파생하므로
+   * 중복 상수를 두지 않는다.
+   */
+  readonly remodel: {
+    /** [초안 Progression §3] 1->2단계 리모델링 비용 */
+    readonly costGold: number;
+    /** [초안 Progression §5] 전환 후 최소 운영 예비금 (게임 시간) */
+    readonly reserveHours: number;
+    /** [초안 Progression §5] 요구 인지도 */
+    readonly requiredAwarenessMilli: number;
+    /** [초안 Progression §5] 요구 소규모 대회 정상 완료 횟수 */
+    readonly requiredSmallTournaments: number;
+  };
+
+  /**
    * [채택 — 잠정 밸런스] 대회 예약 시 요구하는 운영 예비금 (게임 시간).
    *
    * Economy §8("준비비 지급 후 운영 예비금 확보를 검사한다")과
@@ -212,12 +230,20 @@ export interface EconomyConfig {
  * B-1(대회 예약)과 B-2(진행·정산·보상·예상치)에서는 올리지 않았다.
  * 그 작업들은 상태를 추가했을 뿐 공식과 9단계 순서를 바꾸지 않았다.
  *
- * B-3에서 올렸다. 8단계가 "비용 확정 -> 부족액 지원 -> 1회 차감"으로 바뀌었고,
+ * B-3에서 economy-0.1+adopt-v1 -> economy-0.2+b3-emergency로 올렸다.
+ * 8단계가 "비용 확정 -> 부족액 지원 -> 1회 차감"으로 바뀌었고,
  * 긴급 운영 중 신규 착석이 유지 대상 테이블 하나로 제한되며,
  * 9단계가 긴급 축소 처리와 기존 배치 전환 중 하나를 고르게 됐다.
  * 자금이 마르지 않는 상태의 결과는 이전과 같지만, 규칙 자체가 달라졌으므로 올린다.
+ *
+ * C-1에서 economy-0.2+b3-emergency -> economy-0.3+c1-remodel로 올렸다.
+ * 리모델링 공사 중에는 5단계의 신규 방문 생성이 멈추고(누적 잔여도 동결),
+ * 6단계의 신규 착석이 막히며, 7단계의 만족도 갱신이 고정되고,
+ * 9단계 마지막에 리모델링 전환이 추가됐다. 긴급 축소의 적용 시점도 유예된다.
+ * 리모델링이 걸리지 않은 상태(remodel === null)의 결과는 이전과 같지만,
+ * 규칙 자체가 달라졌으므로 올린다.
  */
-export const RULES_VERSION = 'economy-0.2+b3-emergency';
+export const RULES_VERSION = 'economy-0.3+c1-remodel';
 
 /**
  * 직렬화 스키마 버전.
@@ -235,10 +261,15 @@ export const RULES_VERSION = 'economy-0.2+b3-emergency';
  *   GameState.emergency
  *   records.totalEmergencySupportUnits / emergencyMinutes / nextEmergencySeq
  *
+ * 4 -> 5 (C-1): 리모델링 완료 기록과 작업 번호가 추가됐다.
+ *   records.completedRemodels / nextRemodelSeq
+ * GameState.remodel 필드 자체는 작업 A(v1)부터 늘 있었으므로 초기화하지 않고
+ * 값만 확인한다. v4는 리모델링 작업을 표현할 수 없었으므로 null이어야 한다.
+ *
  * 모든 마이그레이션의 의미가 완전히 정의된다 (state.ts의 migrateSave 참조).
  * v2가 담을 수 있던 대회 상태(없음 / DRAINING / READY)는 그대로 보존한다.
  */
-export const SAVE_VERSION = 4;
+export const SAVE_VERSION = 5;
 
 export const DEFAULT_CONFIG: EconomyConfig = {
   rulesVersion: RULES_VERSION,
@@ -375,6 +406,13 @@ export const DEFAULT_CONFIG: EconomyConfig = {
     smallTournamentTableCount: 3,
     smallTournamentAwarenessMilli: milli(10),
     skilledDealerTableCount: 3,
+  },
+
+  remodel: {
+    costGold: 15000,
+    reserveHours: 4,
+    requiredAwarenessMilli: milli(50),
+    requiredSmallTournaments: 2,
   },
 
   // 채택 (잠정). 05 채택기록 R10 참조.
