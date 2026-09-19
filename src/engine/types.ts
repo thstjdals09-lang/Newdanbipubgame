@@ -357,6 +357,7 @@ export type EngineEvent =
   | { readonly type: 'sessionCompleted'; readonly sessionId: SessionId; readonly revenueUnits: Money }
   | { readonly type: 'dealerChangeApplied'; readonly tableId: TableId; readonly dealerId: StaffId | null }
   | { readonly type: 'unlockGranted'; readonly id: string }
+  | { readonly type: 'staffGranted'; readonly staffId: StaffId; readonly staffType: StaffType; readonly rewardId: string }
   | { readonly type: 'tournamentReserved'; readonly tournamentId: string; readonly tableIds: readonly TableId[]; readonly dealerIds: readonly StaffId[]; readonly prepCostUnits: Money }
   | { readonly type: 'tournamentReady'; readonly tournamentId: string }
   | { readonly type: 'tournamentStarted'; readonly tournamentId: string; readonly startedAtMinute: GameMinute; readonly endsAtMinute: GameMinute }

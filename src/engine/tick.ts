@@ -9,13 +9,13 @@
  *   6. 대기 만료 -> 기존 대기 -> 신규 방문 순으로 착석. 잔여는 대기 또는 이탈.
  *   7. 서비스 품질·최근 이탈률·만족도를 갱신하고 세션 인지도 보상을 반영한다.
  *   8. 급여·시설비·운영비를 해당 1분만큼 차감한다.
- *   9. 해금·직원 배치 전환을 판정하고 상태를 저장 대상으로 만든다.
+ *   9. 해금·특별 직원 지급·배치 전환을 판정하고 상태를 저장 대상으로 만든다.
  *
  * 순서를 바꾸면 같은 조건의 재현 결과가 바뀌므로 rulesVersion을 올려야 한다.
  */
 
 import { DEFAULT_CONFIG } from '../config/economy.js';
-import type { EconomyConfig } from '../config/economy.js';
+import type { EconomyConfig, StaffType } from '../config/economy.js';
 import { processCommands } from './commands.js';
 import { minuteCosts } from './costs.js';
 import { stepArrivals } from './demand.js';
@@ -46,7 +46,68 @@ function processUnlocks(state: GameState, config: EconomyConfig, events: EngineE
     tables >= config.unlock.smallTournamentTableCount &&
       state.venue.awarenessMilli >= config.unlock.smallTournamentAwarenessMilli,
   );
-  // 특별 직원의 실제 지급은 작업 B다 (05 §2 D5). 여기서는 해금 기록만 남긴다.
+}
+
+/**
+ * 특별 직원 지급 마커 (작업 B-2B).
+ *
+ * **해금 기록과 지급 기록을 분리한다.**
+ *   skilledDealerGrant           자격 도달 기록. B-1부터 있었고 직원을 만들지 않았다.
+ *   skilledDealerAwarded         직원을 실제로 지급했다는 증거. 아래에서만 붙인다.
+ *
+ * 기존 v3 저장본에는 자격 기록만 있고 직원이 없을 수 있다. 자격 기록을 지급의
+ * 증거로 쓰면 그 저장본이 보상을 영영 못 받는다. 그래서 별도 ID를 쓴다.
+ *
+ * 마커를 unlocks 배열에 담으므로 새 영속 필드가 필요 없고 saveVersion도 오르지 않는다.
+ */
+export const SKILLED_DEALER_REWARD_ID = 'skilledDealerAwarded';
+export const TOURNAMENT_SPECIALIST_REWARD_ID = 'tournamentSpecialistAwarded';
+
+/**
+ * 틱 9단계: 특별 직원 지급 (Economy §5, Progression §4).
+ *
+ *   숙련 딜러       테이블 3개 설치 -> 1명
+ *   대회 전문 딜러  소규모 대회 1회 정상 완료 -> 1명
+ *
+ * 둘 다 **대기(standby) 상태, 미배치**로 만든다. 기존 딜러를 교체하거나
+ * 자동 배치하지 않는다. 배치는 플레이어가 기존 assignDealer로 한다.
+ * 대기 직원은 급여가 없다 (Economy §5).
+ *
+ * 조건은 상태에서 직접 본다. 해금 기록이 아니라 조건 자체를 보므로
+ * 기록만 있고 직원을 못 받은 기존 저장본도 다음 틱에 정확히 한 번 받는다.
+ *
+ * 9단계는 8단계(비용 차감)와 3단계(대회 처리)보다 뒤다. 따라서 이번 분에
+ * 새로 생긴 직원이 이미 시작된 세션이나 대회에 영향을 주지 않는다.
+ */
+function processStaffRewards(
+  state: GameState,
+  config: EconomyConfig,
+  events: EngineEvent[],
+): void {
+  const award = (rewardId: string, eligible: boolean, type: StaffType): void => {
+    if (!eligible) return;
+    if (state.unlocks.some((u) => u.id === rewardId)) return; // 이미 지급했다
+
+    const id = `S${state.records.nextStaffSeq}`;
+    state.records.nextStaffSeq += 1;
+    state.staff.push({ id, type, duty: 'standby', assignedTableId: null });
+    state.unlocks.push({ id: rewardId, grantedAtMinute: state.time.minute });
+    events.push({ type: 'staffGranted', staffId: id, staffType: type, rewardId });
+  };
+
+  award(
+    SKILLED_DEALER_REWARD_ID,
+    installedTableCount(state) >= config.unlock.skilledDealerTableCount,
+    'skilled',
+  );
+
+  // "첫 소규모 대회 완료" (Economy §5). 완료 기록에서 직접 확인하므로
+  // 이후 대회가 몇 번 더 끝나도 마커가 이미 있어 두 번 지급되지 않는다.
+  award(
+    TOURNAMENT_SPECIALIST_REWARD_ID,
+    state.records.completedTournaments.some((c) => c.scale === 'small'),
+    'tournament',
+  );
 }
 
 /** 틱 9단계: 기존 세션이 모두 끝난 closing 테이블의 딜러 변경을 반영한다 (Economy §5). */
@@ -181,8 +242,9 @@ export function tick(
     events.push({ type: 'cashNegative', cash: state.venue.cash });
   }
 
-  // 9) 해금·배치 전환
+  // 9) 해금·보상·배치 전환
   processUnlocks(state, config, events);
+  processStaffRewards(state, config, events);
   applyPendingDealerChanges(state, events);
 
   assertInvariants(state);

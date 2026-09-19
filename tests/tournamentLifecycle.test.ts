@@ -426,9 +426,23 @@ describe('T16~T17 자원 복귀와 나머지 테이블', () => {
       expect(dealer.duty).toBe('working');
       expect(dealer.assignedTableId).toBe(tableId);
     }
-    // 테이블·직원이 생기거나 사라지지 않았다
+    // 테이블은 생기거나 사라지지 않았다
     expect(done.tables).toHaveLength(state.tables.length);
-    expect(done.staff).toHaveLength(state.staff.length);
+
+    // 기존 직원은 한 명도 사라지거나 바뀌지 않았다
+    for (const before of state.staff) {
+      const after = done.staff.find((s) => s.id === before.id);
+      expect(after).toBeDefined();
+      expect(after!.type).toBe(before.type);
+    }
+
+    // 늘어난 직원은 B-2B의 대회 전문 딜러 보상 1명뿐이다.
+    // 완료 트랜잭션 자체가 직원을 만든 것이 아니라 9단계 보상이 지급한 것이다.
+    const added = done.staff.filter((s) => !state.staff.some((b) => b.id === s.id));
+    expect(added).toHaveLength(1);
+    expect(added[0]!.type).toBe('tournament');
+    expect(added[0]!.duty).toBe('standby');
+    expect(added[0]!.assignedTableId).toBeNull();
   });
 
   it('완료 뒤 예약 딜러를 다시 배치할 수 있다', () => {
