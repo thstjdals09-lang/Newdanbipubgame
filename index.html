@@ -1,0 +1,107 @@
+<!DOCTYPE html>
+<html lang="ko">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+<title>홀덤펍 타이쿤</title>
+<style>
+  :root {
+    --bg: #f7f6f3;
+    --panel: #ffffff;
+    --line: #dcd8d0;
+    --text: #1d1b18;
+    --muted: #6b655c;
+    --accent: #1f6f4a;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root:not([data-theme="light"]) {
+      --bg: #171614;
+      --panel: #201e1b;
+      --line: #35312c;
+      --text: #ece9e3;
+      --muted: #a09a90;
+      --accent: #6cc79a;
+    }
+  }
+  :root[data-theme="dark"] {
+    --bg: #171614;
+    --panel: #201e1b;
+    --line: #35312c;
+    --text: #ece9e3;
+    --muted: #a09a90;
+    --accent: #6cc79a;
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0;
+    padding-block: 48px;
+    padding-left: 16px;
+    padding-right: 16px;
+    background: var(--bg);
+    color: var(--text);
+    font: 16px/1.7 "Pretendard", system-ui, -apple-system, "Segoe UI", sans-serif;
+  }
+  main { max-width: 640px; margin: 0 auto; display: flex; flex-direction: column; gap: 28px; }
+  h1 { margin: 0; font-size: 1.6rem; letter-spacing: -0.01em; }
+  .sub { margin: 6px 0 0; color: var(--muted); font-size: 0.9rem; }
+  .card {
+    background: var(--panel);
+    border: 1px solid var(--line);
+    border-radius: 10px;
+    padding: 20px;
+  }
+  .card h2 { margin: 0 0 6px; font-size: 1.05rem; }
+  .card p { margin: 0 0 12px; color: var(--muted); font-size: 0.9rem; }
+  a.go {
+    display: inline-block;
+    color: var(--accent);
+    font-weight: 600;
+    text-decoration: none;
+    border-bottom: 1px solid currentColor;
+  }
+  .none { border-style: dashed; }
+  .none h2 { color: var(--muted); }
+  code { font-family: ui-monospace, "Cascadia Code", Consolas, monospace; font-size: 0.85em; }
+  footer { color: var(--muted); font-size: 0.8rem; border-top: 1px solid var(--line); padding-top: 16px; }
+</style>
+</head>
+<body>
+<main>
+  <header>
+    <h1>홀덤펍 타이쿤</h1>
+    <p class="sub">결정론적 경제 엔진을 개발 중인 프로젝트입니다. 이 주소는 저장소의 정적 배포본입니다.</p>
+  </header>
+
+  <section class="card">
+    <h2>WORLD STUDIO</h2>
+    <p>
+      세계 규칙을 편집하고 실제 경제 엔진으로 검증·실험하는 개발자 도구입니다.
+      이 배포본에서 저장한 버전은 <strong>열어 본 브라우저 안에만</strong> 남습니다 —
+      저장소의 <code>studio/data/</code> 파일이나 게임 설정을 바꾸지 않습니다.
+    </p>
+    <a class="go" href="./studio/">WORLD STUDIO 열기 →</a>
+  </section>
+
+  <section class="card none">
+    <h2>게임 플레이 화면 — 아직 없습니다</h2>
+    <p>
+      현재 저장소에는 헤드리스 경제 엔진과 그 개발 도구만 있습니다.
+      플레이할 수 있는 게임 화면은 만들지 않았으므로, 이 주소에서 게임을 실행할 수 없습니다.
+    </p>
+  </section>
+
+  <section class="card">
+    <h2>초기 골격 보존본</h2>
+    <p>
+      프로젝트를 만들 때의 자리표시 골격입니다. 경제 엔진과 무관하고 게임 내용이 없습니다.
+      지우지 않고 그대로 두기 위해 함께 올립니다.
+    </p>
+    <a class="go" href="./legacy/">보존본 열기 →</a>
+  </section>
+
+  <footer>
+    <a class="go" href="https://github.com/thstjdals09-lang/Newdanbipubgame">저장소 보기</a>
+  </footer>
+</main>
+</body>
+</html>
